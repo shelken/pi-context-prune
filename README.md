@@ -23,7 +23,7 @@ As long agent sessions grow, every tool call adds token-heavy output to the cont
 
 1. **Detects** when an assistant turn finishes calling tools (`turn_end`)
 2. **Summarizes** that batch of tool calls using your configured model
-3. **Injects** a compact summary message before the next LLM call (`deliverAs: "steer"`)
+3. **Injects** a compact hidden summary message before the next LLM call (`deliverAs: "steer"`)
 4. **Prunes** the original verbose tool outputs from future context (`context` event)
 5. **Preserves** every original output in the session index — retrievable at any time via `context_tree_query`
 
@@ -325,7 +325,7 @@ before_agent_start (agentic-auto mode)
 - **Config** lives in `~/.pi/agent/context-prune/settings.json` — the extension's own file, independent of Pi's project settings
 - **Index** is persisted via `pi.appendEntry("context-prune-index", { toolCalls })` — one entry per summarized batch, NOT in LLM context
 - **Prune frontier** is persisted via `pi.appendEntry("context-prune-frontier", ...)` — it records the last attempted prune boundary even when an oversized summary is rejected
-- **Summaries** are injected as `custom_message` entries with `customType: "context-prune-summary"` — these ARE in LLM context (replacing the raw outputs only when pruning is accepted). Their visible text uses short refs, while the `details.toolCallRefs` metadata keeps the full `toolCallId` mapping for later recovery.
+- **Summaries** are injected as hidden `custom_message` entries with `customType: "context-prune-summary"` — these ARE in LLM context (replacing the raw outputs only when pruning is accepted) but are not rendered into Pi's main message window. Their text uses short refs, while the `details.toolCallRefs` metadata keeps the full `toolCallId` mapping for later recovery.
 - The underlying session JSONL file always retains the original `ToolResultMessage` entries unchanged
 
 ### Footer status widget

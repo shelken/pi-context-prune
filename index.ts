@@ -189,7 +189,7 @@ export default function (pi: ExtensionAPI) {
 
     const appendEntry = (customType: string, data?: unknown) => sessionManager!.appendCustomEntry(customType, data);
     const appendSummaryMessage = (content: string, details: unknown) =>
-      sessionManager!.appendCustomMessageEntry(CUSTOM_TYPE_SUMMARY, content, true, details);
+      sessionManager!.appendCustomMessageEntry(CUSTOM_TYPE_SUMMARY, content, false, details);
 
     try {
       setPruneStatusWidget(ctx, currentConfig.value, "prune: summarizing…");
@@ -255,10 +255,12 @@ export default function (pi: ExtensionAPI) {
 
         try {
           if (!shouldSkipOversized) {
-            // Write one summary message per turn and index its tool calls.
+            // Write one hidden summary message per turn and index its tool calls.
+            // `display: false` keeps the summary in future LLM context and session
+            // history without printing the full markdown block into Pi's main window.
             if (delivery === "runtime") {
               pi.sendMessage(
-                { customType: CUSTOM_TYPE_SUMMARY, content: summaryText, display: true, details: batchDetails },
+                { customType: CUSTOM_TYPE_SUMMARY, content: summaryText, display: false, details: batchDetails },
                 { deliverAs: "steer" }
               );
               indexer.registerSummaryRefs(summaryRefs);
