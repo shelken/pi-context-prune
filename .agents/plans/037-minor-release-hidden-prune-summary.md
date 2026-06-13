@@ -9,11 +9,11 @@ steps:
   - phase: implementation
     steps:
       - "- [x] step 1: commit the hidden-summary change on main"
-      - "- [ ] step 2: run the repository release script for a minor bump"
+      - "- [x] step 2: run the repository release script for a minor bump"
   - phase: validation
     steps:
-      - "- [ ] step 1: confirm the new version/tag and that main plus tag were pushed"
-      - "- [ ] step 2: update the plan checklist to reflect the completed release"
+      - "- [x] step 1: confirm the new version/tag and that main plus tag were pushed"
+      - "- [x] step 2: update the plan checklist to reflect the completed release"
 ---
 
 # 037-minor-release-hidden-prune-summary
@@ -24,8 +24,8 @@ steps:
 
 ## Phase 2 — Implementation
 - [x] step 1: commit the hidden-summary change on main
-- [ ] step 2: run the repository release script for a minor bump
+- [x] step 2: run the repository release script for a minor bump
 
 ## Phase 3 — Validation
-- [ ] step 1: confirm the new version/tag and that main plus tag were pushed
-- [ ] step 2: update the plan checklist to reflect the completed release
+- [x] step 1: confirm the new version/tag and that main plus tag were pushed
+- [x] step 2: update the plan checklist to reflect the completed release
