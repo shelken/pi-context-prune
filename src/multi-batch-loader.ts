@@ -4,6 +4,9 @@
  * character counts while running, and checks each row off as the
  * corresponding LLM summarization call completes.
  *
+ * Esc / q call onAbort so the command can abort its local controller. The
+ * command should keep the overlay open until flush cleanup finishes.
+ *
  * Construction requires knowing the batch list up-front (call
  * capturePendingBatches() before opening the overlay), which lets the
  * component pre-build all rows and their spinner labels.
@@ -85,7 +88,7 @@ export class MultiBatchLoaderOverlay extends Container {
     );
   }
 
-  /** Forward Esc / q to the abort handler so the overlay can be dismissed. */
+  /** Forward Esc / q to the abort handler (invocation-local AbortController). */
   handleInput(data: string): boolean {
     if (data === "\x1b" || data === "q") {
       this._onAbort?.();

@@ -6,15 +6,16 @@ import {
   PRUNE_ON_MODES,
   BATCHING_MODES,
   STATUS_WIDGET_ID,
-  PROGRESS_WIDGET_ID,
   SUMMARIZER_THINKING_LEVELS,
 } from "./types.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { saveConfig } from "./config.js";
-import { formatTokens, formatCost, formatCharProgress } from "./stats.js";
+import { formatTokens, formatCost } from "./stats.js";
 import { Container, Text, SettingsList, type SettingItem } from "@earendil-works/pi-tui";
 import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
+import { MultiBatchLoaderOverlay } from "./multi-batch-loader.js";
+import { runCancellableFlush } from "./cancellable-flush.js";
 import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
 
@@ -80,7 +81,7 @@ const SUBCOMMANDS = [
   { value: "batching", label: "batching  — show or set the batching mode (turn / agent-message)" },
   { value: "stats",   label: "stats     — show cumulative summarizer token/cost stats" },
   { value: "tree",    label: "tree      — browse pruned tool calls in a foldable tree" },
-  { value: "now",     label: "now       — flush pending tool calls immediately (widget progress)" },
+  { value: "now",     label: "now       — flush pending tool calls immediately (cancellable overlay)" },
   { value: "help",    label: "help      — show this help" },
 ] as const;
 
@@ -190,7 +191,7 @@ Usage:
   /pruner batching agent-message           One summary per user→final-agent-message span (merges all turns in a span)
   /pruner stats                            Show cumulative summarizer token/cost stats
   /pruner tree                             Browse pruned tool calls in a foldable tree (Ctrl-O opens selected summary)
-  /pruner now                              Flush pending tool calls immediately (shows live footer progress)
+  /pruner now                              Flush pending tool calls immediately (Esc/q cancels)
   /pruner help                             Show this help
 
 Agentic-auto reminder:
@@ -220,125 +221,6 @@ Related:
   - Anthropic prompt caching docs: https://docs.claude.com/en/docs/build-with-claude/prompt-caching
 
 Settings are saved to ~/.pi/agent/context-prune/settings.json`;
-
-// ── Pruner progress widget ────────────────────────────────────────────────────
-
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-const SPINNER_INTERVAL_MS = 120;
-
-type RowStatus = "pending" | "running" | "done" | "skipped";
-
-interface WidgetRow {
-  label: string;
-  toolCallCount: number;
-  rawChars: number;
-  status: RowStatus;
-  receivedChars: number;
-}
-
-/**
- * Registers a multi-row progress widget above the editor for /pruner now.
- * Returns helpers to update row state and clear the widget when done.
- * Each row shows a spinner, label, tool-call count, and live summary char count.
- */
-function startPrunerWidget(
-  ctx: ExtensionCommandContext,
-  batches: CapturedBatch[],
-): {
-  updateRow: (index: number, status: RowStatus, chars?: number) => void;
-  clearWidget: () => void;
-} {
-  const total = batches.length;
-  const rows: WidgetRow[] = batches.map((b, i) => ({
-    label: `Batch ${i + 1}/${total}`,
-    toolCallCount: b.toolCalls.length,
-    rawChars: b.toolCalls.reduce((sum, tc) => sum + tc.resultText.length, 0),
-    status: "pending",
-    receivedChars: 0,
-  }));
-
-  // Capture tui reference from the factory so updateRow can call requestRender.
-  let requestRender: (() => void) | undefined;
-  let animationTimer: ReturnType<typeof setInterval> | undefined;
-
-  const hasRunningRows = () => rows.some((row) => row.status === "running");
-
-  const stopAnimationLoop = () => {
-    if (!animationTimer) return;
-    clearInterval(animationTimer);
-    animationTimer = undefined;
-  };
-
-  // The widget only re-renders when Pi is asked to draw again. Drive a tiny
-  // timer while any row is running so the spinner advances even before the
-  // summarizer streams its first text chunk.
-  const ensureAnimationLoop = () => {
-    if (animationTimer || !requestRender || !hasRunningRows()) return;
-    animationTimer = setInterval(() => {
-      if (!hasRunningRows()) {
-        stopAnimationLoop();
-        return;
-      }
-      requestRender?.();
-    }, SPINNER_INTERVAL_MS);
-    animationTimer.unref?.();
-  };
-
-  const syncAnimationLoop = () => {
-    if (hasRunningRows()) {
-      ensureAnimationLoop();
-    } else {
-      stopAnimationLoop();
-    }
-    requestRender?.();
-  };
-
-  ctx.ui.setWidget(
-    PROGRESS_WIDGET_ID,
-    (tui, _theme) => {
-      requestRender = () => tui.requestRender();
-      syncAnimationLoop();
-      return {
-        invalidate() {},
-        render(_width: number): string[] {
-          return rows.map((row) => {
-            const count = `${row.toolCallCount} tool call${row.toolCallCount === 1 ? "" : "s"}`;
-            if (row.status === "running") {
-              const frame = SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length];
-              const chars =
-                row.receivedChars > 0
-                  ? ` · ${formatCharProgress(row.receivedChars, row.rawChars)}`
-                  : "";
-              return `${frame} ${row.label} · ${count}${chars}`;
-            } else if (row.status === "done") {
-              return `✓ ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`;
-            } else if (row.status === "skipped") {
-              return `⚠ ${row.label} · ${count} · skipped`;
-            } else {
-              return `○ ${row.label} · ${count} · pending`;
-            }
-          });
-        },
-      };
-    },
-    { placement: "aboveEditor" },
-  );
-
-  return {
-    updateRow(index: number, status: RowStatus, chars?: number) {
-      if (index >= 0 && index < rows.length) {
-        rows[index].status = status;
-        if (chars !== undefined) rows[index].receivedChars = chars;
-        syncAnimationLoop();
-      }
-    },
-    clearWidget() {
-      stopAnimationLoop();
-      requestRender = undefined;
-      ctx.ui.setWidget(PROGRESS_WIDGET_ID, undefined);
-    },
-  };
-}
 
 // ── Command registration ────────────────────────────────────────────────────
 
@@ -713,37 +595,72 @@ export function registerCommands(
             return;
           }
 
-          // Capture the pending queue first so we can pre-build the widget rows.
+          // Capture the pending queue first so we can pre-build overlay rows.
           const batches = capturePendingBatches(ctx);
           if (batches.length === 0) {
             ctx.ui.notify("pruner: nothing pending — no batches to summarize", "info");
             break;
           }
 
-          // Open the progress widget above the editor — one row per batch.
-          const { updateRow, clearWidget } = startPrunerWidget(ctx, batches);
+          // Input-capable multi-batch overlay with an invocation-local abort
+          // controller. Esc/q abort the summarizer; the overlay stays open until
+          // pending restoration finishes so no flush continues in the background.
+          type FlushResult = Awaited<ReturnType<typeof flushPending>>;
+          let flushResult: FlushResult | null = null;
 
-          const result = await flushPending(ctx, {
-            previewedBatches: batches,
-            onProgress: (index, _total, _batch, stage) => {
-              if (stage === "start") {
-                updateRow(index, "running", 0);
-              } else if (stage === "done") {
-                updateRow(index, "done");
-              } else {
-                updateRow(index, "skipped");
-              }
-            },
-            onBatchTextProgress: (index, _total, _batch, receivedChars) => {
-              updateRow(index, "running", receivedChars);
-            },
-          });
+          await ctx.ui.custom(
+            (tui, theme, _kb, done) => {
+              const overlay = new MultiBatchLoaderOverlay(tui, theme, batches);
 
-          // Remove the widget and restore the normal footer status.
-          clearWidget();
+              void runCancellableFlush({
+                bindAbort: (abort) => {
+                  overlay.onAbort = abort;
+                },
+                flush: (signal) =>
+                  flushPending(ctx, {
+                    previewedBatches: batches,
+                    signal,
+                    onProgress: (index, _total, _batch, stage) => {
+                      if (stage === "start") overlay.markRunning(index);
+                      else if (stage === "done") overlay.markDone(index);
+                      else overlay.markSkipped(index);
+                    },
+                    onBatchTextProgress: (index, _total, _batch, receivedChars) => {
+                      overlay.markReceivedChars(index, receivedChars);
+                    },
+                  }),
+              })
+                .then(({ result }) => {
+                  flushResult = result;
+                  done(undefined);
+                })
+                .catch((err) => {
+                  flushResult = {
+                    ok: false,
+                    reason: "failed",
+                    error: err instanceof Error ? err.message : String(err),
+                  };
+                  done(undefined);
+                });
+
+              return overlay;
+            },
+            { overlay: true },
+          );
+
           setPruneStatusWidget(ctx, currentConfig.value, getStats());
 
+          const result = flushResult;
+          if (!result) {
+            ctx.ui.notify("pruner: nothing flushed — failed", "warning");
+            break;
+          }
+
           if (!result.ok) {
+            if (result.reason === "aborted") {
+              ctx.ui.notify("pruner: cancelled — pending batches restored", "info");
+              break;
+            }
             const suffix = "error" in result && result.error ? ` (${result.error})` : "";
             ctx.ui.notify(`pruner: nothing flushed — ${result.reason}${suffix}`, result.reason === "empty" ? "info" : "warning");
             break;

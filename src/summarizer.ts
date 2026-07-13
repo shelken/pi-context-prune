@@ -1,4 +1,4 @@
-import { stream } from "@earendil-works/pi-ai";
+import { stream } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type {
@@ -202,15 +202,35 @@ export async function summarizeBatches(
     ];
   }
 
-  // Multiple batches — run in parallel; each produces its own SummarizeResult
-  return Promise.all(
-    batches.map((batch, index) =>
+  // Multiple batches — run in parallel. Wait for every call to settle so an
+  // abort does not leave sibling summarizer requests running in the background.
+  return settleParallelSummaries(
+    batches.map((batch, index) => () =>
       summarizeBatch(batch, config, ctx, {
         signal: options.signal,
         onTextProgress: (receivedChars) => {
           options.onBatchTextProgress?.(index, batches.length, batch, receivedChars);
         },
       })
-    )
+    ),
+    options.signal,
   );
+}
+
+/**
+ * Run parallel summarizer tasks and only resolve after every task settles.
+ * If the shared abort signal fired, throw after cleanup instead of fail-fast.
+ */
+export async function settleParallelSummaries<T>(
+  tasks: Array<() => Promise<T>>,
+  signal?: AbortSignal,
+): Promise<T[]> {
+  const settled = await Promise.allSettled(tasks.map((task) => task()));
+  if (signal?.aborted) {
+    throw new Error("summarizeBatches: aborted");
+  }
+  return settled.map((entry) => {
+    if (entry.status === "fulfilled") return entry.value;
+    throw entry.reason;
+  });
 }

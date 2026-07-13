@@ -121,7 +121,7 @@ References:
 
 **`on-demand`** — Tool-call turns are batched but never summarized automatically. You decide when to flush with `/pruner now`. This is the most manual mode and also the easiest to keep cache-friendly, because you can wait until a large chunk of work is complete before changing earlier context.
 
-**`agent-message`** — Tool-call turns are batched. When the agent finally replies with a normal text answer (a turn with no tool calls), all pending batches are summarized and pruned together. If the agent loop ends before that happens, a safety-net flush runs on `agent_end`. This mode is the default because it usually causes just one context rewrite per meaningful task batch.
+**`agent-message`** — Tool-call turns are batched. When the agent run ends successfully with a normal final text answer (`stopReason === "stop"`, no tool calls), all pending batches are summarized and pruned together on `agent_end`. Network errors, user aborts, and other unsuccessful endings keep the original tool results pending for a later successful run. This mode is the default because it usually causes just one context rewrite per meaningful task batch.
 
 **`agentic-auto`** — The `context_prune` tool is activated and exposed to the LLM. The system prompt tells the model to use it only after a meaningful batch of related tool calls, not after every small step. Used well, this gives the agent flexibility; used badly, it can over-prune and reduce cache effectiveness.
 
@@ -145,7 +145,7 @@ The extension registers the `/pruner` command:
 | `/pruner prune-on <mode>` | Set trigger mode directly |
 | `/pruner stats` | Show cumulative summarizer token/cost stats |
 | `/pruner tree` | Browse pruned tool calls in a foldable tree browser; press `Ctrl-O` on a summary to open it in a bordered overlay |
-| `/pruner now` | Flush pending tool calls immediately (works in all modes) with a live progress overlay that shows streamed received-character counts per batch |
+| `/pruner now` | Flush pending tool calls immediately (works in all modes) with a cancellable multi-batch progress overlay; Esc/`q` aborts and restores pending batches |
 | `/pruner help` | Show full help text |
 
 ### Settings overlay
@@ -299,7 +299,8 @@ tool_execution_end (context_checkpoint / legacy context_tag, on-context-tag mode
   └─► flushPending()
 
 agent_end
-  └─► update footer status only if batches remain pending
+  └─► agent-message + successful stop: flushPending({ delivery: "session", signal })
+  └─► otherwise: update footer status only if batches remain pending
 
 context_prune tool call (agentic-auto mode)
   └─► flushPending()

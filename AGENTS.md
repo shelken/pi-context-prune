@@ -39,6 +39,9 @@ pi-context-prune/
     ├── tree-browser.ts            # TreeBrowser TUI component + buildPruneTree for /pruner tree
     ├── stats.ts                   # StatsAccumulator for cumulative summarizer token/cost tracking
     ├── multi-batch-loader.ts      # MultiBatchLoaderOverlay TUI component for /pruner now progress display
+    ├── agent-end-guard.ts         # Successful final-assistant allow-list for agent-message commits
+    ├── agent-message-lifecycle.ts # agent_end policy: flush only on successful stop
+    ├── cancellable-flush.ts       # Invocation-local AbortController helper for /pruner now
     └── commands.ts                # /pruner command + interactive settings overlay + summary message renderer
 ```
 
@@ -55,8 +58,7 @@ Wires all modules together and registers Pi event handlers:
   - `every-turn`: flushes immediately with `delivery: "session"`.
   - `on-context-tag` / `on-demand` / `agent-message` / `agentic-auto`: queues and notifies the user of pending count and trigger.
 - **`tool_execution_end`** — when `event.toolName` is `context_checkpoint` (or the legacy `context_tag`) and mode is `on-context-tag`, calls `flushPending` with `delivery: "runtime"`.
-- **`message_end`** — when mode is `agent-message` and the message is a final text-only assistant response (no tool calls), calls `flushPending` with `delivery: "session"`. This is the primary flush path for `agent-message` mode.
-- **`agent_end`** — safety net: if pending batches still remain (e.g. because no `message_end` fired before session shutdown), updates the status widget to show the pending count. Does **not** attempt a best-effort LLM call here to avoid starting async work after Pi may have already disposed the session.
+- **`agent_end`** — primary flush path for `agent-message` mode via `handleAgentEndLifecycle`. Summarizes only when the last assistant message has `stopReason === "stop"` and no tool calls, passing `ctx.signal` so Esc can cancel the summarizer. Unsuccessful endings (`error` / `aborted` / `length` / tool use) keep batches pending and refresh the pending status. Other modes only update the pending status when batches remain.
 - **`before_agent_start`** — when mode is `agentic-auto` and pruning is enabled, appends `AGENTIC_AUTO_SYSTEM_PROMPT` to the system prompt so the LLM knows when and how to call `context_prune`.
 - **`context`** — filters the message array sent to the LLM, removing `ToolResultMessage` entries that have been summarized. Additionally, when `pruneOn === "agentic-auto"` and `remindUnprunedCount` is true, appends a `<pruner-note>` reminder to the last toolResult telling the LLM how many unpruned tool calls are currently in context. Returns `undefined` (no change) if neither pruning nor annotation modified the list.
 
@@ -69,7 +71,7 @@ Single source of truth for all interfaces and constants:
   - `every-turn`: summarize after every tool-calling turn.
   - `on-context-tag`: batch turns, flush when `context_checkpoint` (legacy: `context_tag`) is called.
   - `on-demand`: only when the user runs `/pruner now`.
-  - `agent-message`: batch turns, flush when the agent sends a final text-only response (default).
+  - `agent-message`: batch turns, flush on successful `agent_end` (`stop`, no tool calls) (default).
   - `agentic-auto`: the LLM decides when to prune by calling the `context_prune` tool, guided by `AGENTIC_AUTO_SYSTEM_PROMPT`.
 - **`BatchingMode`** — `"turn" | "agent-message"` — granularity of each pruning batch.
   - `turn`: one summary per assistant turn (default; current behavior).
@@ -157,7 +159,7 @@ batch, updates the active row with streamed summary character counts, and checks
 - **`markReceivedChars(index, receivedChars)`** — updates the row label with the number of summary characters streamed so far.
 - **`markDone(index)`** — calls `loader.stop()` + `loader.setMessage("✓ Batch N/M done (K tool calls)")` to freeze the spinner and show a checkmark.
 - **`markSkipped(index)`** — calls `loader.stop()` + `loader.setMessage("⚠ Batch N/M skipped")` when the LLM call returned null.
-- **`onAbort` setter + `handleInput`** — forwards `Esc`/`q` to the abort callback so the overlay can be dismissed without cancelling in-flight LLM calls.
+- **`onAbort` setter + `handleInput`** — forwards `Esc`/`q` to the invocation-local abort callback so `/pruner now` can cancel the in-flight summarizer.
 
 ### `src/stats.ts` — `StatsAccumulator` class + formatting helpers
 Accumulates cumulative token/cost stats for summarizer LLM calls and persists them to the session:
@@ -193,7 +195,7 @@ Accumulates cumulative token/cost stats for summarizer LLM calls and persists th
 - **`/pruner prune-on [value]`** — gets or sets the trigger mode; bare form shows `ctx.ui.select()` picker over `PRUNE_ON_MODES`.
 - **`/pruner batching [value]`** — gets or sets the batching mode (`turn` or `agent-message`); bare form shows `ctx.ui.select()` picker over `BATCHING_MODES`.
 - **`/pruner tree`** — builds a `TreeNode[]` via `buildPruneTree()` and opens a `TreeBrowser` via `ctx.ui.custom()` so the user can browse pruned tool calls interactively.
-- **`/pruner now`** — previews the pending batch queue via `capturePendingBatches(ctx)` before opening the overlay (exits early with a notification if nothing is pending). Opens a `MultiBatchLoaderOverlay` (via `ctx.ui.custom()` with `overlay: true`) showing one animated spinner row per batch. Passes both `onProgress` and `onBatchTextProgress` to `flushPending` so each row first shows live received-character counts, then gets checked off as its individual LLM call completes. Esc closes the overlay but does NOT cancel in-flight LLM calls.
+- **`/pruner now`** — previews the pending batch queue via `capturePendingBatches(ctx)` before opening the overlay (exits early with a notification if nothing is pending). Opens a `MultiBatchLoaderOverlay` (via `ctx.ui.custom()` with `overlay: true`) with an invocation-local `AbortController`. Esc/`q` abort the summarizer; the overlay stays open until pending restoration finishes so no flush continues in the background. Progress rows still show running / received-chars / done / skipped.
 - **`/pruner help`** — displays `HELP_TEXT` via `ctx.ui.notify`.
 - **`default` case** — directs unknown subcommands to run `/pruner help`.
 - **Message renderer** for `context-prune-summary` — renders summary messages in the TUI with a styled header (accent color) showing turn index and tool count; collapses to header-only when not expanded, shows full content when expanded.
@@ -212,8 +214,8 @@ Accumulates cumulative token/cost stats for summarizer LLM calls and persists th
 | Config in `~/.pi/agent/context-prune/settings.json` | Extension owns its own file — no risk of clobbering other Pi settings, and config persists across all projects |
 | Five `pruneOn` trigger modes | `every-turn` (immediate), `on-context-tag` (aligned with save-points), `on-demand` (manual), `agent-message` (batch until final text response), `agentic-auto` (LLM decides via `context_prune` tool) — lets users trade immediacy for batch efficiency |
 | `pendingBatches` queue + `flushPending` | Decouples capture (always at `turn_end`) from summarization (mode-dependent). `flushPending` drains all pending batches into a **single** `summarizeBatches` LLM call, reducing round-trips from N to 1. |
-| `message_end` instead of `turn_end` for `agent-message` flush | `message_end` fires reliably at the final text-only response and before session teardown, giving time to capture the sessionManager before awaiting the summarizer LLM call. `turn_end` in print mode fires too late. |
-| `agent_end` as status update only | Avoids starting async LLM work after Pi may have disposed the session. If batches remain, the user sees a "N pending" status and can `/pruner now` next session. |
+| Guarded `agent_end` for `agent-message` flush | `message_end` also fires for `error`/`aborted` assistant messages. `agent_end` is the full-run boundary, is awaited before Pi clears the active run, and still has `ctx.signal` for Esc cancellation. Session delivery captures the appender before the summarizer await. |
+| Strict `stop` allow-list | Only `stopReason === "stop"` with no tool calls commits automatic pruning. `error`/`aborted`/`length`/tool-use keep original ToolResults pending. |
 | `context_prune` tool always registered, conditionally activated | Keeps Pi's tool registry consistent; `syncToolActivation()` adds/removes it from the active list on every config change without re-registering. |
 | `MultiBatchLoaderOverlay` for `/pruner now` | Shows per-batch spinner rows with live streamed summary-character counts, then checks each row off as its LLM call completes — gives concrete progress feedback instead of a single static "summarizing…" message. Sequential LLM calls are used only for this user-triggered path; auto-flush paths keep the parallel per-batch approach for efficiency |
 | `context_prune` onUpdate progress | Keeps the footer status simple while agentic-auto pruning still shows live progress in the running tool output box above the input |
@@ -224,6 +226,6 @@ Accumulates cumulative token/cost stats for summarizer LLM calls and persists th
 | Status widget includes stats suffix | Footer shows `prune: ON (Every turn) │ ↑1.2k ↓340 $0.003` after summarizer calls, giving users visibility into pruner overhead |
 | Auth via `ctx.modelRegistry.getApiKeyAndHeaders()` | Explicit credential resolution for the summarizer LLM call, with error notification on failure |
 | `TreeBrowser` for `/pruner tree` | Gives users a visual, keyboard-navigable audit trail of what was pruned and how much space was saved, without leaving the Pi TUI |
-| `BorderedLoader` for `/pruner now` | The overlay captures TUI input while `flushPending` awaits the LLM call, preventing double-invocation and new model turns. Esc closes the overlay without cancelling the in-flight call. |
+| Invocation-local AbortController for `/pruner now` | Manual flush has no active agent signal. Esc/`q` abort that controller; the command waits for pending restoration before closing the overlay so no background flush remains. |
 | `userTurnGroup` field on `CapturedBatch` | Assigned in `captureUnindexedBatchesFromSession` by incrementing a counter at every user message — gives `groupBatchesByMode` a stable key to merge turns within the same conversation exchange without changing the live `turn_end` capture path. |
 | `batchingMode` is separate from `pruneOn` | `pruneOn` controls *when* to flush; `batchingMode` controls *how coarse* each summary is. Keeping them independent lets users mix e.g. `pruneOn: on-demand` with `batchingMode: agent-message` freely. |

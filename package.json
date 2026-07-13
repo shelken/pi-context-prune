@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "echo 'nothing to build'",
-    "check": "echo 'nothing to check'"
+    "check": "bun test tests/",
+    "test": "bun test tests/"
   },
   "keywords": [
     "pi-package"
@@ -29,5 +30,11 @@
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-tui": "*",
     "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-tui": "0.80.6",
+    "@sinclair/typebox": "0.34.52"
   }
 }

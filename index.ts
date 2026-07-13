@@ -37,6 +37,7 @@ import {
 import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
+import { handleAgentEndLifecycle } from "./src/agent-message-lifecycle.js";
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
@@ -78,13 +79,6 @@ export default function (pi: ExtensionAPI) {
       if (!isStaleContextError(err)) throw err;
     }
   };
-
-  const assistantMessageHasToolCalls = (message: any) =>
-    message?.role === "assistant" &&
-    Array.isArray(message.content) &&
-    message.content.some((block: any) => block?.type === "toolCall");
-
-  const isFinalAssistantMessage = (message: any) => message?.role === "assistant" && !assistantMessageHasToolCalls(message);
 
   const trimBatchToPendingRange = (batch: CapturedBatch): CapturedBatch | null => {
     const currentFrontier = frontier.get();
@@ -433,7 +427,7 @@ export default function (pi: ExtensionAPI) {
     const hasToolResults = event.toolResults && event.toolResults.length > 0;
 
     if (!hasToolResults) {
-      // Text-only final turns are handled by message_end in agent-message mode.
+      // Text-only final turns are handled by agent_end in agent-message mode.
       // In print mode, turn_end can fire after session shutdown, so do not start
       // deferred LLM work from this late lifecycle event.
       return;
@@ -495,25 +489,23 @@ export default function (pi: ExtensionAPI) {
     await flushPending(ctx, { delivery: "runtime" });
   });
 
-  // ── message_end: flush after the final assistant response in agent-message mode ──
-  // A final assistant message is the earliest reliable boundary where the agent has
-  // finished using the raw tool results. flushPending captures the SessionManager
-  // before awaiting summarization so print-mode shutdown cannot invalidate the
-  // persistence path while the summarizer model is running.
-  pi.on("message_end", async (event, ctx) => {
-    if (!currentConfig.value.enabled) return;
-    if (currentConfig.value.pruneOn !== "agent-message") return;
-    if (!isFinalAssistantMessage(event.message)) return;
-    await flushPending(ctx, { delivery: "session" });
-  });
-
-  // ── agent_end: last-chance cleanup only ─────────────────────────────────────
-  // agent-message normally flushes on message_end. By agent_end, print-mode Pi may
-  // already be disposing the session, so avoid starting a best-effort LLM call here.
-  pi.on("agent_end", async (_event, ctx) => {
-    if (!currentConfig.value.enabled) return;
-    if (pendingBatches.length === 0) return;
-    setPruneStatusWidget(ctx, currentConfig.value, `prune: ${pendingBatches.length} pending`);
+  // ── agent_end: commit agent-message pruning only after a successful run ───
+  // message_end also fires for error/aborted assistant messages, so it is not a
+  // reliable success boundary. agent_end is awaited before Pi clears the active
+  // run, so the active abort signal still works and session delivery can capture
+  // the appender before awaiting the summarizer.
+  pi.on("agent_end", async (event, ctx) => {
+    await handleAgentEndLifecycle({
+      enabled: currentConfig.value.enabled,
+      pruneOn: currentConfig.value.pruneOn,
+      messages: event.messages,
+      pendingCount: pendingBatches.length,
+      signal: ctx.signal,
+      flush: (options) => flushPending(ctx, options),
+      setPendingStatus: (count) => {
+        setPruneStatusWidget(ctx, currentConfig.value, `prune: ${count} pending`);
+      },
+    });
   });
 
   // ── context: prune summarized tool results from next LLM call ─────────────
