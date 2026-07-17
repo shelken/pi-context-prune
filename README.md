@@ -144,7 +144,7 @@ The extension registers the `/pruner` command:
 | `/pruner prune-on` | Interactive picker over all trigger modes |
 | `/pruner prune-on <mode>` | Set trigger mode directly |
 | `/pruner stats` | Show cumulative summarizer token/cost stats |
-| `/pruner tree` | Browse pruned tool calls in a foldable tree browser; press `Ctrl-O` on a summary to open it in a bordered overlay |
+| `/pruner tree` | Open local web viewer of agent-visible conversation + summaries (shared `http://127.0.0.1:17342/`) |
 | `/pruner now` | Flush pending tool calls immediately (works in all modes) with a cancellable multi-batch progress overlay; Esc/`q` aborts and restores pending batches |
 | `/pruner help` | Show full help text |
 
@@ -268,7 +268,9 @@ src/
   context-prune-tool.ts     — context_prune tool registration (agentic-auto)
   frontier.ts               — persisted prune-frontier tracker for last attempted prune boundary
   stats.ts                  — StatsAccumulator for cumulative token/cost tracking
-  tree-browser.ts           — foldable tree browser for /pruner tree
+  viewer-document.ts        — pure branch+indexer → ViewerDocument builder
+  viewer-server.ts          — shared localhost viewer + latest snapshot file
+  viewer-page.ts            — self-contained HTML UI for /pruner tree
   commands.ts               — /pruner command + settings overlay + message renderer
 ```
 
@@ -348,13 +350,13 @@ The extension registers a status widget in the Pi footer that shows the current 
 - The `context_prune` tool is only activated in `agentic-auto` mode.
 - The summarizer call happens synchronously inside `turn_end`, adding latency between turns proportional to the summarizer model's response time.
 - Mid-turn pruning now supports completed subsets of a longer tool chain, but batching is still based on assistant-message groups rather than arbitrary semantic task labels.
-- The `/pruner tree` browser shows pruned tool calls grouped under their summaries. Press `Ctrl-O` on a summary node to open the full pruned summary message in a bordered overlay. It still does not recover full original tool outputs inline (use `context_tree_query` for that).
+- `/pruner tree` opens a localhost web viewer of the agent-visible conversation timeline. Summaries link original tool bodies from the indexer for side-by-side quality review. Multiple pi processes share one fixed port; the latest published session wins.
 - Summary grouping across multiple turns (e.g., "compress the last 5 summaries") is a follow-up item.
 
 ## Follow-up ideas
 
 - Auto-summarize older unsummarized turns on `/pruner on`
 - Batch multiple turn summaries into a single meta-summary at compaction time
-- ~~`/pruner original-tree`~~ ✅ `/pruner tree` foldable tree browser — done
+- ~~`/pruner original-tree`~~ ✅ `/pruner tree` web conversation viewer — done
 - Configurable pruning policy (prune only large tool results, prune by token count threshold)
 - Tighter `/settings` integration once Pi exposes a settings UI API

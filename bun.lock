@@ -4,11 +4,17 @@
   "workspaces": {
     "": {
       "name": "pi-context-prune",
+      "devDependencies": {
+        "@earendil-works/pi-ai": "0.80.6",
+        "@earendil-works/pi-coding-agent": "0.80.6",
+        "@earendil-works/pi-tui": "0.80.6",
+        "@sinclair/typebox": "0.34.52",
+      },
       "peerDependencies": {
-        "@earendil-works/pi-ai": "^0.80.6",
-        "@earendil-works/pi-coding-agent": "^0.80.6",
-        "@earendil-works/pi-tui": "^0.80.6",
-        "@sinclair/typebox": "^0.34.52",
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+        "@sinclair/typebox": "*",
       },
     },
   },

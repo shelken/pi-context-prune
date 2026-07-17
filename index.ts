@@ -16,12 +16,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
-import { summarizeBatch, summarizeBatches } from "./src/summarizer.js";
+import { resolveModel, summarizeBatch, summarizeBatches } from "./src/summarizer.js";
 import { ToolCallIndexer } from "./src/indexer.js";
 import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
 import { registerQueryTool } from "./src/query-tool.js";
 import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
+import { stopViewerServer } from "./src/viewer-server.js";
 import { formatSummaryToolCallRefs, makeSummaryDetails, wrapSummaryForContext } from "./src/summary-refs.js";
 import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions } from "./src/types.js";
 import {
@@ -227,6 +228,11 @@ export default function (pi: ExtensionAPI) {
       let totalToolCallCount = 0;
       const oversizedBatches: CapturedBatch[] = [];
       let firstFailureIndex = -1;
+      const resolved = resolveModel(currentConfig.value, ctx);
+      const summarizerModel =
+        resolved && typeof resolved === "object" && "provider" in resolved && "id" in resolved
+          ? `${String((resolved as { provider: string }).provider)}/${String((resolved as { id: string }).id)}`
+          : currentConfig.value.summarizerModel;
 
       for (let i = 0; i < batches.length; i++) {
         const result = results[i];
@@ -246,7 +252,7 @@ export default function (pi: ExtensionAPI) {
         totalSummaryCharCount += summaryText.length;
         totalToolCallCount += batch.toolCalls.length;
 
-        const batchDetails = makeSummaryDetails(batch, summaryRefs);
+        const batchDetails = makeSummaryDetails(batch, summaryRefs, summarizerModel);
 
         try {
           if (!shouldSkipOversized) {
@@ -385,6 +391,8 @@ export default function (pi: ExtensionAPI) {
   // ── session_start: restore config + index + stats ────────────────────────────────
   pi.on("session_start", async (_event, ctx) => {
     // Load config from ~/.pi/agent/context-prune/settings.json
+    // Note: do NOT stopViewerServer here — session switch would kill a live tree tab.
+    // Cleanup is session_shutdown + module reload (globalThis handle).
     currentConfig.value = await loadConfig();
 
     // Rebuild in-memory index from persisted session entries
@@ -564,4 +572,10 @@ export default function (pi: ExtensionAPI) {
 
   // ── Register /pruner command + summary message renderer ────────────
   registerCommands(pi, currentConfig, flushPending, capturePendingBatches, syncToolActivation, () => statsAccum.getStats(), indexer);
+
+  // Viewer HTTP server lives in-process; close it on session end so reload
+  // does not leave a stale LISTEN on 17342 with old HTML handlers.
+  pi.on("session_shutdown", async () => {
+    stopViewerServer();
+  });
 }

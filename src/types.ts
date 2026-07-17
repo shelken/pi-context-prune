@@ -268,6 +268,8 @@ export interface SummaryMessageDetails {
   toolNames: string[];
   turnIndex: number;
   timestamp: number;
+  /** Resolved provider/model that produced this summary (e.g. openai/gpt-5). */
+  summarizerModel?: string;
 }
 
 // ── Summarizer stats ────────────────────────────────────────────────────────

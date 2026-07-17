@@ -13,11 +13,12 @@ import { saveConfig } from "./config.js";
 import { formatTokens, formatCost } from "./stats.js";
 import { Container, Text, SettingsList, type SettingItem } from "@earendil-works/pi-tui";
 import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
 import { MultiBatchLoaderOverlay } from "./multi-batch-loader.js";
 import { runCancellableFlush } from "./cancellable-flush.js";
 import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
+import { buildViewerDocument } from "./viewer-document.js";
+import { openViewer, publishViewerDocument } from "./viewer-server.js";
 
 /**
  * Wraps a SettingsList with a border + title, delegating all input handling
@@ -80,7 +81,7 @@ const SUBCOMMANDS = [
   { value: "prune-on", label: "prune-on  — show or set the trigger mode" },
   { value: "batching", label: "batching  — show or set the batching mode (turn / agent-message)" },
   { value: "stats",   label: "stats     — show cumulative summarizer token/cost stats" },
-  { value: "tree",    label: "tree      — browse pruned tool calls in a foldable tree" },
+  { value: "tree",    label: "tree      — open web viewer of agent-visible conversation" },
   { value: "now",     label: "now       — flush pending tool calls immediately (cancellable overlay)" },
   { value: "help",    label: "help      — show this help" },
 ] as const;
@@ -160,6 +161,31 @@ function remindUnprunedCountDescription(config: ContextPruneConfig): string {
   return `Inject a small <pruner-note> reminder before each LLM call. Currently ${base}, but has NO effect in '${config.pruneOn}' mode — only honored when prune trigger is 'agentic-auto'.`;
 }
 
+/** Best-effort session label for the web viewer header. */
+function sessionMetaFromContext(ctx: ExtensionCommandContext): {
+  sessionId: string;
+  sessionLabel: string;
+  timestamp: number;
+} {
+  const sm = ctx.sessionManager as {
+    getSessionId?: () => string;
+    getSessionFile?: () => string | null | undefined;
+  };
+  const sessionId =
+    (typeof sm.getSessionId === "function" ? sm.getSessionId() : "") ||
+    `session-${Date.now()}`;
+  const file =
+    typeof sm.getSessionFile === "function" ? sm.getSessionFile() ?? "" : "";
+  const pathOrLabel = file || sessionId;
+  const parts = pathOrLabel.split(/[/\\]/).filter(Boolean);
+  const sessionLabel = parts[parts.length - 1] ?? pathOrLabel;
+  return {
+    sessionId,
+    sessionLabel,
+    timestamp: Date.now(),
+  };
+}
+
 function pruneStatusLineDescription(config: ContextPruneConfig): string {
   const base = config.showPruneStatusLine ? "ON" : "OFF";
   if (config.showPruneStatusLine) {
@@ -190,7 +216,7 @@ Usage:
   /pruner batching turn                    One summary per assistant turn (default)
   /pruner batching agent-message           One summary per user→final-agent-message span (merges all turns in a span)
   /pruner stats                            Show cumulative summarizer token/cost stats
-  /pruner tree                             Browse pruned tool calls in a foldable tree (Ctrl-O opens selected summary)
+  /pruner tree                             Open local web viewer of agent-visible conversation + summaries
   /pruner now                              Flush pending tool calls immediately (Esc/q cancels)
   /pruner help                             Show this help
 
@@ -460,24 +486,40 @@ export function registerCommands(
           break;
         }
 
-        // ── /pruner tree ── foldable tree browser ──
+        // ── /pruner tree ── local web conversation viewer ──
         case "tree": {
-          const roots = buildPruneTree(ctx, indexer);
-          if (roots.length === 0) {
-            ctx.ui.notify("No pruned tool calls found in this session.", "info");
-            break;
+          try {
+            const sm = ctx.sessionManager as {
+              getBranch?: () => unknown[];
+              buildContextEntries?: () => unknown[];
+              getEntries?: () => unknown[];
+              getLeafId?: () => string | null;
+            };
+            // Prefer leaf path; fall back if leaf is unset / empty (common after reload).
+            let branch: unknown[] =
+              typeof sm.getBranch === "function" ? sm.getBranch() ?? [] : [];
+            if (branch.length === 0 && typeof sm.buildContextEntries === "function") {
+              branch = sm.buildContextEntries() ?? [];
+            }
+            if (branch.length === 0 && typeof sm.getEntries === "function") {
+              branch = sm.getEntries() ?? [];
+            }
+            const meta = sessionMetaFromContext(ctx);
+            const doc = buildViewerDocument(branch, indexer, meta);
+            await publishViewerDocument(doc);
+            // Do not forceOpen: if the tab is already up it polls latest; avoid spam tabs.
+            const { url, openedBrowser, alreadyRunning } = await openViewer();
+            const action = openedBrowser ? "opened" : alreadyRunning ? "updated" : "ready";
+            const leaf =
+              typeof sm.getLeafId === "function" ? sm.getLeafId() ?? "null" : "?";
+            ctx.ui.notify(
+              `pruner tree: ${action} ${url} (${doc.stats.messageCount} rows, branch ${doc.stats.branchEntryCount}, leaf ${leaf})`,
+              doc.stats.messageCount === 0 ? "warning" : "info",
+            );
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            ctx.ui.notify(`pruner tree failed: ${message}`, "error");
           }
-
-          await ctx.ui.custom(
-            (_tui, theme, _keybindings, done) => {
-              const browser = new TreeBrowser(roots, theme, () => done(undefined));
-              return browser;
-            },
-            {
-              overlay: true,
-              overlayOptions: { width: "80%", maxHeight: "70%", anchor: "center" },
-            },
-          );
           break;
         }
 

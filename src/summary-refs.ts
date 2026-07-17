@@ -90,11 +90,16 @@ export function unwrapSummaryForDisplay(content: string): string {
   return inner;
 }
 
-export function makeSummaryDetails(batch: CapturedBatch, refs: SummaryToolCallRef[]) {
+export function makeSummaryDetails(
+  batch: CapturedBatch,
+  refs: SummaryToolCallRef[],
+  summarizerModel?: string,
+) {
   return {
     toolCallRefs: refs,
     toolNames: batch.toolCalls.map((tc) => tc.toolName),
     turnIndex: batch.turnIndex,
     timestamp: batch.timestamp,
+    ...(summarizerModel ? { summarizerModel } : {}),
   };
 }

@@ -36,7 +36,9 @@ pi-context-prune/
     ├── reminder.ts                # Append <pruner-note> reminder to last toolResult (agentic-auto only)
     ├── query-tool.ts              # Register the context_tree_query tool for recovering pruned outputs
     ├── context-prune-tool.ts      # Register the context_prune tool for agentic-auto mode
-    ├── tree-browser.ts            # TreeBrowser TUI component + buildPruneTree for /pruner tree
+    ├── viewer-document.ts         # Pure builder: session branch + indexer → ViewerDocument for web tree
+    ├── viewer-server.ts           # Shared localhost viewer (publish latest, open browser, idle stop)
+    ├── viewer-page.ts             # Self-contained HTML/CSS/JS for the conversation viewer
     ├── stats.ts                   # StatsAccumulator for cumulative summarizer token/cost tracking
     ├── multi-batch-loader.ts      # MultiBatchLoaderOverlay TUI component for /pruner now progress display
     ├── agent-end-guard.ts         # Successful final-assistant allow-list for agent-message commits
@@ -138,16 +140,11 @@ Registers the `context_prune` tool with Pi. The tool is **always registered** (s
 - Returns a typed `FlushResult` describing how many batches and tool calls were summarized, or a reason if the flush did not run (empty, already-flushing, stale-context, etc.).
 - Carries `promptSnippet` and `promptGuidelines` so the LLM is guided to call it after batches of 8–10 tool calls, not after every 2–3.
 
-### `src/tree-browser.ts` — `TreeBrowser` TUI component
-Provides a foldable interactive tree view of pruned tool calls, opened by `/pruner tree`.
-- **`buildPruneTree(ctx, indexer)`** — scans the current session branch for `CUSTOM_TYPE_SUMMARY` entries and constructs a `TreeNode[]` where each summary is a parent node and its pruned tool calls are children. Each node carries a `charCount` (character count of the result text) so the UI can show space savings at a glance.
-- **`TreeNode`** — `{ id, label, children, expanded, depth, isLeaf, detail?, charCount? }`. Summary nodes carry their markdown summary text in `detail`; tool-call leaf nodes carry a 200-char result preview.
-- **`TreeBrowser`** — a `Component` (Pi TUI interface) implementing a scrollable keyboard-navigable tree:
-  - Arrow keys move selection; `Enter`/`Space` expand/collapse parent nodes.
-  - `Ctrl-O` opens a **summary overlay** for the selected summary node — a centered box rendering the full markdown summary with scroll support.
-  - `Esc`/`q` closes the overlay (or the browser if no overlay is open).
-  - Renders via `boxLines()` (a local box-drawing helper that draws `┌─┐` borders with a title).
-  - The overlay uses the `Markdown` TUI renderer with `getMarkdownTheme()` for styled summary display.
+### `src/viewer-document.ts` / `viewer-server.ts` / `viewer-page.ts` — Web conversation viewer
+Replaces the old TUI tree with a localhost web page opened by `/pruner tree`.
+- **`buildViewerDocument(branch, indexer, meta)`** — pure transform into a `ViewerDocument` timeline matching agent-visible context (`pruneMessages` semantics: drop summarized toolResults; keep assistant tool-call blocks). Summary rows carry short refs + original tool bodies from the indexer for quality comparison.
+- **`publishViewerDocument` / `openViewer`** — write latest snapshot under `~/.pi/agent/context-prune/viewer-latest.json`, ensure one fixed-port server (`127.0.0.1:17342`), open the system browser. Multiple pi processes share the same endpoint via the file + health check; last publish wins.
+- **Page UX** — messages collapsed by default, click to expand, scroll to bottom on load/update, poll latest + heartbeat; idle after last tab closes stops the in-process server.
 
 ### `src/multi-batch-loader.ts` — `MultiBatchLoaderOverlay` TUI component
 Provides a multi-row progress overlay for `/pruner now` that shows one animated spinner per pending
@@ -194,7 +191,7 @@ Accumulates cumulative token/cost stats for summarizer LLM calls and persists th
 - **`/pruner thinking [value]`** — gets or sets the summarizer thinking level; bare form shows `ctx.ui.select()` picker over `SUMMARIZER_THINKING_LEVELS`.
 - **`/pruner prune-on [value]`** — gets or sets the trigger mode; bare form shows `ctx.ui.select()` picker over `PRUNE_ON_MODES`.
 - **`/pruner batching [value]`** — gets or sets the batching mode (`turn` or `agent-message`); bare form shows `ctx.ui.select()` picker over `BATCHING_MODES`.
-- **`/pruner tree`** — builds a `TreeNode[]` via `buildPruneTree()` and opens a `TreeBrowser` via `ctx.ui.custom()` so the user can browse pruned tool calls interactively.
+- **`/pruner tree`** — builds a `ViewerDocument` from the current branch + indexer, publishes it as latest, and opens the shared local web viewer (`http://127.0.0.1:17342/`).
 - **`/pruner now`** — previews the pending batch queue via `capturePendingBatches(ctx)` before opening the overlay (exits early with a notification if nothing is pending). Opens a `MultiBatchLoaderOverlay` (via `ctx.ui.custom()` with `overlay: true`) with an invocation-local `AbortController`. Esc/`q` abort the summarizer; the overlay stays open until pending restoration finishes so no flush continues in the background. Progress rows still show running / received-chars / done / skipped.
 - **`/pruner help`** — displays `HELP_TEXT` via `ctx.ui.notify`.
 - **`default` case** — directs unknown subcommands to run `/pruner help`.
@@ -225,7 +222,7 @@ Accumulates cumulative token/cost stats for summarizer LLM calls and persists th
 | `SummarizeResult` return type | Summarizer functions return `{ summaryText, usage }` so callers can accumulate token/cost data without side effects in the summarizer module |
 | Status widget includes stats suffix | Footer shows `prune: ON (Every turn) │ ↑1.2k ↓340 $0.003` after summarizer calls, giving users visibility into pruner overhead |
 | Auth via `ctx.modelRegistry.getApiKeyAndHeaders()` | Explicit credential resolution for the summarizer LLM call, with error notification on failure |
-| `TreeBrowser` for `/pruner tree` | Gives users a visual, keyboard-navigable audit trail of what was pruned and how much space was saved, without leaving the Pi TUI |
+| Web viewer for `/pruner tree` | Full agent-visible conversation timeline in a browser so developers can compare summaries vs originals; shared fixed port across pi processes |
 | Invocation-local AbortController for `/pruner now` | Manual flush has no active agent signal. Esc/`q` abort that controller; the command waits for pending restoration before closing the overlay so no background flush remains. |
 | `userTurnGroup` field on `CapturedBatch` | Assigned in `captureUnindexedBatchesFromSession` by incrementing a counter at every user message — gives `groupBatchesByMode` a stable key to merge turns within the same conversation exchange without changing the live `turn_end` capture path. |
 | `batchingMode` is separate from `pruneOn` | `pruneOn` controls *when* to flush; `batchingMode` controls *how coarse* each summary is. Keeping them independent lets users mix e.g. `pruneOn: on-demand` with `batchingMode: agent-message` freely. |
