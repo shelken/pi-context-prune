@@ -72,6 +72,50 @@ function receivedTextChars(message: AssistantMessage): number {
   }, 0);
 }
 
+type StreamSimple = (
+  model: unknown,
+  context: unknown,
+  options?: unknown,
+) => ReturnType<typeof stream>;
+
+type RegistryWithCustomStream = ExtensionContext["modelRegistry"] & {
+  // 0.80.8+ facade; absent on 0.80.7 where registerProvider still bridges into compat.
+  getRegisteredProviderConfig?: (providerName: string) =>
+    | { streamSimple?: StreamSimple }
+    | undefined;
+};
+
+export type OpenModelStreamDeps = {
+  /** Override compat.stream (tests inject a fake). */
+  stream?: typeof stream;
+};
+
+/**
+ * Open a model stream using the same path as the main agent when possible.
+ *
+ * Why: pi 0.80.8+ stopped bridging registerProvider({ streamSimple }) into
+ * pi-ai/compat's global api registry. Direct compat.stream() then throws
+ * "No API provider registered for api: <custom>" for extension providers
+ * (codebuddy / grok-cli / ...). Prefer the provider's own streamSimple when
+ * ModelRegistry exposes it; otherwise fall back to compat.stream for builtins
+ * and for 0.80.7 where the bridge still exists.
+ */
+export function openModelStream(
+  model: { provider: string },
+  context: Parameters<typeof stream>[1],
+  options: Parameters<typeof stream>[2],
+  ctx: ExtensionContext,
+  deps: OpenModelStreamDeps = {},
+): ReturnType<typeof stream> {
+  const registry = ctx.modelRegistry as RegistryWithCustomStream;
+  const custom = registry.getRegisteredProviderConfig?.(model.provider)?.streamSimple;
+  if (custom) {
+    return custom(model, context, options);
+  }
+  const streamFn = deps.stream ?? stream;
+  return streamFn(model as Parameters<typeof stream>[0], context, options);
+}
+
 /**
  * Summarizes a captured batch. Returns formatted markdown string, or null on failure.
  * Shows user-visible errors via ctx.ui.notify.
@@ -101,7 +145,8 @@ export async function summarizeBatch(
 
     // Pass the abort signal so the underlying fetch is cancelled immediately
     // when the user presses Esc while the tool is running.
-    const responseStream = stream(
+    // Prefer provider streamSimple (0.80.8+ custom apis); else compat.stream.
+    const responseStream = openModelStream(
       model,
       {
         messages: [
@@ -112,7 +157,8 @@ export async function summarizeBatch(
           },
         ],
       },
-      { apiKey: auth.apiKey, headers: auth.headers, signal: options.signal, ...summarizerThinkingOptions(config) }
+      { apiKey: auth.apiKey, headers: auth.headers, signal: options.signal, ...summarizerThinkingOptions(config) },
+      ctx,
     );
 
     let lastReportedChars = -1;
