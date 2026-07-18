@@ -182,6 +182,37 @@ describe("injectSummaries for agentic-auto", () => {
     }
   });
 
+  test("summary spanning assistant turns appears after the last covered toolCall", () => {
+    const indexer = new ToolCallIndexer();
+    indexTool(indexer, "tc1");
+    indexTool(indexer, "tc2");
+    recordSummary(indexer, "multi-turn summary", ["tc1", "tc2"]);
+
+    const messages = [
+      assistantWithCalls("tc1"),
+      toolResult("tc1", "out-1"),
+      assistantWithCalls("tc2"),
+      toolResult("tc2", "out-2"),
+      { role: "user", content: "later" },
+    ] as any[];
+
+    const result = injectSummaries(
+      pruneMessages(messages, indexer, "agentic-auto"),
+      indexer,
+      "agentic-auto",
+    );
+
+    expect(result).toEqual([
+      messages[0],
+      messages[2],
+      expect.objectContaining({
+        customType: CUSTOM_TYPE_SUMMARY,
+        content: "multi-turn summary",
+      }),
+      messages[4],
+    ]);
+  });
+
   test("multi-batch: each batch summary appears once, near its own toolCalls", () => {
     const indexer = new ToolCallIndexer();
     indexTool(indexer, "tc1");

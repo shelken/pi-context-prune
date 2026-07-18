@@ -122,7 +122,7 @@ Maintains the runtime `Map<toolCallId, ToolCallRecord>` and handles session pers
 
 ### `src/pruner.ts` — Context message filter + agentic-auto summary inject
 - **`pruneMessages(messages, indexer, pruneOn?)`** — filters the `context` event's message array. Other modes drop indexed `ToolResultMessage`s as before; agentic-auto drops them only when the covering summary's complete batch index is committed. Assistant tool-call blocks remain so the model can call `context_tree_query` by ID.
-- **`injectSummaries(messages, indexer, pruneOn)`** — agentic-auto only pure normalization: removes indexer-managed persisted summaries, then re-inserts only committed summaries near the first covered toolCall block. Summaries whose toolCalls left context (for example after compaction) stay out; repeated calls are idempotent. Other modes return messages unchanged.
+- **`injectSummaries(messages, indexer, pruneOn)`** — agentic-auto only pure normalization: removes indexer-managed persisted summaries, then re-inserts only committed summaries after the last covered toolCall block so merged multi-turn batches stay causally ordered. Summaries whose toolCalls left context (for example after compaction) stay out; repeated calls are idempotent. Other modes return messages unchanged.
 
 ### `src/reminder.ts` — Unpruned-count reminder (agentic-auto only)
 - **`countUnprunedToolCalls(messages, indexer)`** — walks `AssistantMessage` `toolCall` content blocks and counts those whose id is NOT in the indexer.

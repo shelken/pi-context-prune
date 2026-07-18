@@ -33,29 +33,33 @@ function summaryKeyFromMessage(msg: any): string | null {
 }
 
 /**
- * Find where a batch summary should sit: after the first assistant toolCall
+ * Find where a batch summary should sit: after the last assistant toolCall
  * block it covers (and any remaining toolResults that still follow it).
  */
 function findSummaryInsertIndex(messages: any[], toolCallIds: string[]): number | undefined {
   const idSet = new Set(toolCallIds);
+  let coveredAt: number | undefined;
+
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
     const has = msg.content.some(
       (block: any) => block?.type === "toolCall" && typeof block.id === "string" && idSet.has(block.id),
     );
-    if (!has) continue;
-    let j = i + 1;
-    while (
-      j < messages.length &&
-      (messages[j]?.role === "toolResult" ||
-        (messages[j]?.role === "custom" && messages[j]?.customType === CUSTOM_TYPE_SUMMARY))
-    ) {
-      j++;
-    }
-    return j;
+    if (has) coveredAt = i;
   }
-  return undefined;
+  if (coveredAt === undefined) return undefined;
+
+  let insertAt = coveredAt + 1;
+  while (
+    insertAt < messages.length &&
+    (messages[insertAt]?.role === "toolResult" ||
+      (messages[insertAt]?.role === "custom" &&
+        messages[insertAt]?.customType === CUSTOM_TYPE_SUMMARY))
+  ) {
+    insertAt++;
+  }
+  return insertAt;
 }
 
 /**
