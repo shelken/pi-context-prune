@@ -7,10 +7,23 @@ import {
   type SummaryToolCallRef,
 } from "./summary-refs.js";
 
+/** One prune-batch summary stored for agentic-auto context injection. */
+export interface StoredSummary {
+  content: string;
+  toolCallIds: string[];
+  details: unknown;
+}
+
+function summaryKey(toolCallIds: string[]): string {
+  return toolCallIds.slice().sort().join("\0");
+}
+
 export class ToolCallIndexer {
   private index = new Map<string, ToolCallRecord>();
   private aliasToToolCallId = new Map<string, string>();
   private nextShortAliasNumber = 1;
+  /** Batch summaries keyed by sorted toolCallId set — source for agentic-auto inject. */
+  private summaries = new Map<string, StoredSummary>();
 
   /**
    * Rebuilds the in-memory index from session history by scanning all
@@ -20,6 +33,7 @@ export class ToolCallIndexer {
     this.index.clear();
     this.aliasToToolCallId.clear();
     this.nextShortAliasNumber = 1;
+    this.summaries.clear();
 
     const branch = ctx.sessionManager.getBranch();
     for (const entry of branch) {
@@ -34,8 +48,9 @@ export class ToolCallIndexer {
       }
 
       if (entry.type === "custom_message" && (entry as any).customType === CUSTOM_TYPE_SUMMARY) {
-        const refs = normalizeSummaryToolCallRefs((entry as any).details);
-        this.registerSummaryRefs(refs);
+        // 恢复 summary 文本供 agentic-auto 的 context 注入（不依赖 steer 投递）
+        const content = typeof (entry as any).content === "string" ? (entry as any).content : "";
+        this.recordSummary(content, (entry as any).details);
       }
     }
   }
@@ -69,6 +84,25 @@ export class ToolCallIndexer {
         this.nextShortAliasNumber = Math.max(this.nextShortAliasNumber, Number(match[1]) + 1);
       }
     }
+  }
+
+  /**
+   * Store a batch summary for later context injection (agentic-auto).
+   * Also registers short-id aliases from details. Dedupes by toolCallId set.
+   */
+  recordSummary(content: string, details: unknown): void {
+    const refs = normalizeSummaryToolCallRefs(details);
+    this.registerSummaryRefs(refs);
+    const toolCallIds = refs.map((r) => r.toolCallId);
+    if (toolCallIds.length === 0 || !content) return;
+    const key = summaryKey(toolCallIds);
+    if (this.summaries.has(key)) return;
+    this.summaries.set(key, { content, toolCallIds, details });
+  }
+
+  /** All stored batch summaries (order of first insertion). */
+  getSummaries(): StoredSummary[] {
+    return [...this.summaries.values()];
   }
 
   /**

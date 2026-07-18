@@ -18,7 +18,7 @@ import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
 import { resolveModel, summarizeBatch } from "./src/summarizer.js";
 import { ToolCallIndexer } from "./src/indexer.js";
-import { pruneMessages } from "./src/pruner.js";
+import { injectSummaries, pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
 import { registerQueryTool } from "./src/query-tool.js";
 import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
@@ -259,16 +259,25 @@ export default function (pi: ExtensionAPI) {
             // Write one hidden summary message per turn and index its tool calls.
             // `display: false` keeps the summary in future LLM context and session
             // history without printing the full markdown block into Pi's main window.
-            if (delivery === "runtime") {
+            //
+            // agentic-auto: never steer — context_prune runs while isStreaming, and
+            // steer would re-wake the agent with summary-as-user. Persist to session
+            // + indexer; context handler injects near pruned toolResults.
+            if (delivery === "runtime" && currentConfig.value.pruneOn === "agentic-auto") {
+              const sm = ctx.sessionManager as SessionAppender;
+              sm.appendCustomMessageEntry(CUSTOM_TYPE_SUMMARY, summaryText, false, batchDetails);
+              indexer.recordSummary(summaryText, batchDetails);
+              indexer.addBatch(batch, pi);
+            } else if (delivery === "runtime") {
               pi.sendMessage(
                 { customType: CUSTOM_TYPE_SUMMARY, content: summaryText, display: false, details: batchDetails },
                 { deliverAs: "steer" }
               );
-              indexer.registerSummaryRefs(summaryRefs);
+              indexer.recordSummary(summaryText, batchDetails);
               indexer.addBatch(batch, pi);
             } else {
               appendSummaryMessage(summaryText, batchDetails);
-              indexer.registerSummaryRefs(summaryRefs);
+              indexer.recordSummary(summaryText, batchDetails);
               persistBatchIndex(batch, appendEntry);
             }
             prunedBatchCount++;
@@ -541,6 +550,15 @@ export default function (pi: ExtensionAPI) {
       const pruned = pruneMessages(messages, indexer);
       if (pruned.length !== messages.length) {
         messages = pruned;
+        changed = true;
+      }
+    }
+
+    // agentic-auto: inject batch summaries near pruned toolCalls (no steer).
+    if (currentConfig.value.pruneOn === "agentic-auto") {
+      const withSummaries = injectSummaries(messages, indexer, currentConfig.value.pruneOn);
+      if (withSummaries !== messages) {
+        messages = withSummaries;
         changed = true;
       }
     }

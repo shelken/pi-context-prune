@@ -62,7 +62,7 @@ Wires all modules together and registers Pi event handlers:
 - **`tool_execution_end`** — when `event.toolName` is `context_checkpoint` (or the legacy `context_tag`) and mode is `on-context-tag`, calls `flushPending` with `delivery: "runtime"`.
 - **`agent_end`** — primary flush path for `agent-message` mode via `handleAgentEndLifecycle`. Summarizes only when the last assistant message has `stopReason === "stop"` and no tool calls, passing `ctx.signal` so Esc can cancel the summarizer. Unsuccessful endings (`error` / `aborted` / `length` / tool use) keep batches pending and refresh the pending status. Other modes only update the pending status when batches remain.
 - **`before_agent_start`** — when mode is `agentic-auto` and pruning is enabled, appends `AGENTIC_AUTO_SYSTEM_PROMPT` to the system prompt so the LLM knows when and how to call `context_prune`.
-- **`context`** — filters the message array sent to the LLM, removing `ToolResultMessage` entries that have been summarized. Additionally, when `pruneOn === "agentic-auto"` and `remindUnprunedCount` is true, appends a `<pruner-note>` reminder to the last toolResult telling the LLM how many unpruned tool calls are currently in context. Returns `undefined` (no change) if neither pruning nor annotation modified the list.
+- **`context`** — filters the message array sent to the LLM, removing `ToolResultMessage` entries that have been summarized. When `pruneOn === "agentic-auto"`, also injects stored batch summaries near the pruned toolCalls via pure `injectSummaries` (no steer). Additionally, when `remindUnprunedCount` is true, appends a `<pruner-note>` reminder to the last toolResult. Returns `undefined` (no change) if neither pruning nor annotation modified the list.
 
 ### `src/types.ts` — Shared types and constants
 Single source of truth for all interfaces and constants:
@@ -113,13 +113,15 @@ Single source of truth for all interfaces and constants:
 
 ### `src/indexer.ts` — `ToolCallIndexer` class
 Maintains the runtime `Map<toolCallId, ToolCallRecord>` and handles session persistence:
-- **`reconstructFromSession(ctx)`** — scans the current branch's session entries for `CUSTOM_TYPE_INDEX` custom entries and repopulates the in-memory map.
+- **`reconstructFromSession(ctx)`** — scans the current branch's session entries for `CUSTOM_TYPE_INDEX` custom entries and repopulates the in-memory map; also restores batch summary text from `CUSTOM_TYPE_SUMMARY` custom_message entries via `recordSummary`.
 - **`addBatch(batch, pi)`** — adds all records from a batch to the map and calls `pi.appendEntry(CUSTOM_TYPE_INDEX, ...)` to persist them so they survive restarts and branch switches.
+- **`recordSummary(content, details)`** / **`getSummaries()`** — stores batch summary text (keyed by sorted toolCallId set) for agentic-auto context injection; also registers short-id aliases.
 - **`isSummarized(toolCallId)`** — used by the pruner to decide which messages to drop.
 - **`getRecord(toolCallId)`** / **`lookupToolCalls(ids)`** — used by the query tool and tree-browser to retrieve full original outputs.
 
-### `src/pruner.ts` — Context message filter
+### `src/pruner.ts` — Context message filter + agentic-auto summary inject
 - **`pruneMessages(messages, indexer)`** — filters the `context` event's message array. Drops any message with `role === "toolResult"` whose `toolCallId` is present in the index. All other messages (including `AssistantMessage` tool-call blocks that carry the IDs) are kept so the model can still reference them when calling `context_tree_query`.
+- **`injectSummaries(messages, indexer, pruneOn)`** — agentic-auto only pure inject: inserts stored batch summaries as `role:"custom"` / `CUSTOM_TYPE_SUMMARY` near the first covered toolCall block. Dedupes by toolCallId set so re-entry is idempotent. Other modes return messages unchanged.
 
 ### `src/reminder.ts` — Unpruned-count reminder (agentic-auto only)
 - **`countUnprunedToolCalls(messages, indexer)`** — walks `AssistantMessage` `toolCall` content blocks and counts those whose id is NOT in the indexer.
@@ -205,7 +207,7 @@ Accumulates cumulative token/cost stats for summarizer LLM calls and persists th
 | Decision | Rationale |
 |---|---|
 | Pruning only `ToolResultMessage`s | `AssistantMessage` tool-call blocks (which carry IDs) are kept so the model can call `context_tree_query` by ID |
-| Two `flushPending` delivery modes | `"runtime"` uses `pi.sendMessage` steer (safe during active agent loops); `"session"` writes via `sessionManager` directly (safe when Pi may be shutting down the session after print-mode runs) |
+| Two `flushPending` delivery modes | `"runtime"` uses `pi.sendMessage` steer for non-agentic-auto modes; agentic-auto runtime path skips steer (session `appendCustomMessageEntry` + indexer `recordSummary` + context inject) because `context_prune` runs while streaming and steer would re-wake the agent; `"session"` writes via `sessionManager` directly (safe when Pi may be shutting down the session after print-mode runs) |
 | `pi.appendEntry` for persistence | Session custom entries survive restarts and branch navigation; index is rebuilt on `session_start` / `session_tree` |
 | `summarizerModel: "default"` | Reuses the active model's credentials via `ctx.modelRegistry.getApiKeyAndHeaders()` — no hidden side-channel or extra config needed |
 | `summarizerThinking` setting | Lets users trade summarizer cost/latency for quality; `"default"` preserves old behavior (no explicit reasoning option sent) |
