@@ -20,6 +20,10 @@ const LEGACY_SUMMARY_CONTEXT_NOTICE_LINES = [
 ] as const;
 const LEGACY_SUMMARY_CONTEXT_NOTICE = LEGACY_SUMMARY_CONTEXT_NOTICE_LINES.join("\n");
 
+export function summaryToolCallKey(toolCallIds: string[]): string {
+  return toolCallIds.slice().sort().join("\0");
+}
+
 export function buildShortToolCallRefs(
   toolCallIds: string[],
   startIndex: number,

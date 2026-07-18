@@ -114,14 +114,15 @@ Single source of truth for all interfaces and constants:
 ### `src/indexer.ts` — `ToolCallIndexer` class
 Maintains the runtime `Map<toolCallId, ToolCallRecord>` and handles session persistence:
 - **`reconstructFromSession(ctx)`** — scans the current branch's session entries for `CUSTOM_TYPE_INDEX` custom entries and repopulates the in-memory map; also restores batch summary text from `CUSTOM_TYPE_SUMMARY` custom_message entries via `recordSummary`.
-- **`addBatch(batch, pi)`** — adds all records from a batch to the map and calls `pi.appendEntry(CUSTOM_TYPE_INDEX, ...)` to persist them so they survive restarts and branch switches.
-- **`recordSummary(content, details)`** / **`getSummaries()`** — stores batch summary text (keyed by sorted toolCallId set) for agentic-auto context injection; also registers short-id aliases.
+- **`addBatch(batch, pi)`** — persists the complete batch through `pi.appendEntry(CUSTOM_TYPE_INDEX, ...)`, then publishes all records to the runtime map so failed persistence cannot expose a partial in-memory index.
+- **`recordSummary(content, details)`** / **`getSummaries()`** — stores batch summary text (keyed by sorted toolCallId set) for agentic-auto context injection; also registers short-id aliases. Re-recording the same batch replaces stale retry content.
+- **`getCommittedSummaries()`** — returns only summaries whose full toolCallId set exists in the index; agentic-auto pruning/injection uses this commit boundary.
 - **`isSummarized(toolCallId)`** — used by the pruner to decide which messages to drop.
 - **`getRecord(toolCallId)`** / **`lookupToolCalls(ids)`** — used by the query tool and tree-browser to retrieve full original outputs.
 
 ### `src/pruner.ts` — Context message filter + agentic-auto summary inject
-- **`pruneMessages(messages, indexer)`** — filters the `context` event's message array. Drops any message with `role === "toolResult"` whose `toolCallId` is present in the index. All other messages (including `AssistantMessage` tool-call blocks that carry the IDs) are kept so the model can still reference them when calling `context_tree_query`.
-- **`injectSummaries(messages, indexer, pruneOn)`** — agentic-auto only pure inject: inserts stored batch summaries as `role:"custom"` / `CUSTOM_TYPE_SUMMARY` near the first covered toolCall block. Dedupes by toolCallId set so re-entry is idempotent. Other modes return messages unchanged.
+- **`pruneMessages(messages, indexer, pruneOn?)`** — filters the `context` event's message array. Other modes drop indexed `ToolResultMessage`s as before; agentic-auto drops them only when the covering summary's complete batch index is committed. Assistant tool-call blocks remain so the model can call `context_tree_query` by ID.
+- **`injectSummaries(messages, indexer, pruneOn)`** — agentic-auto only pure normalization: removes indexer-managed persisted summaries, then re-inserts only committed summaries near the first covered toolCall block. Summaries whose toolCalls left context (for example after compaction) stay out; repeated calls are idempotent. Other modes return messages unchanged.
 
 ### `src/reminder.ts` — Unpruned-count reminder (agentic-auto only)
 - **`countUnprunedToolCalls(messages, indexer)`** — walks `AssistantMessage` `toolCall` content blocks and counts those whose id is NOT in the indexer.

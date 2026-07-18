@@ -266,19 +266,19 @@ export default function (pi: ExtensionAPI) {
             if (delivery === "runtime" && currentConfig.value.pruneOn === "agentic-auto") {
               const sm = ctx.sessionManager as SessionAppender;
               sm.appendCustomMessageEntry(CUSTOM_TYPE_SUMMARY, summaryText, false, batchDetails);
-              indexer.recordSummary(summaryText, batchDetails);
               indexer.addBatch(batch, pi);
+              indexer.recordSummary(summaryText, batchDetails);
             } else if (delivery === "runtime") {
               pi.sendMessage(
                 { customType: CUSTOM_TYPE_SUMMARY, content: summaryText, display: false, details: batchDetails },
                 { deliverAs: "steer" }
               );
-              indexer.recordSummary(summaryText, batchDetails);
               indexer.addBatch(batch, pi);
+              indexer.recordSummary(summaryText, batchDetails);
             } else {
               appendSummaryMessage(summaryText, batchDetails);
-              indexer.recordSummary(summaryText, batchDetails);
               persistBatchIndex(batch, appendEntry);
+              indexer.recordSummary(summaryText, batchDetails);
             }
             prunedBatchCount++;
           } else {
@@ -547,7 +547,7 @@ export default function (pi: ExtensionAPI) {
     let changed = false;
 
     if (!indexEmpty) {
-      const pruned = pruneMessages(messages, indexer);
+      const pruned = pruneMessages(messages, indexer, currentConfig.value.pruneOn);
       if (pruned.length !== messages.length) {
         messages = pruned;
         changed = true;

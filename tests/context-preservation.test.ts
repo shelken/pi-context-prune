@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { injectSummaries, pruneMessages } from "../src/pruner.ts";
 import { ToolCallIndexer } from "../src/indexer.ts";
-import { CUSTOM_TYPE_SUMMARY } from "../src/types.ts";
+import { CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY } from "../src/types.ts";
 
 function toolResult(id: string, text: string) {
   return {
@@ -82,6 +82,34 @@ describe("context seam after cancel or success", () => {
   });
 });
 
+describe("ToolCallIndexer commit boundary", () => {
+  test("failed batch persistence does not expose a partial runtime index", () => {
+    const indexer = new ToolCallIndexer();
+    const batch = {
+      turnIndex: 1,
+      timestamp: 1,
+      assistantText: "",
+      toolCalls: [
+        {
+          toolCallId: "tc1",
+          toolName: "bash",
+          args: {},
+          resultText: "out-1",
+          isError: false,
+        },
+      ],
+    } as any;
+    const pi = {
+      appendEntry() {
+        throw new Error("stale context");
+      },
+    } as any;
+
+    expect(() => indexer.addBatch(batch, pi)).toThrow("stale context");
+    expect(indexer.getIndex().size).toBe(0);
+  });
+});
+
 describe("injectSummaries for agentic-auto", () => {
   test("agentic-auto: summarized toolResult is removed and summary appears near the toolCall", () => {
     const indexer = new ToolCallIndexer();
@@ -95,7 +123,7 @@ describe("injectSummaries for agentic-auto", () => {
       { role: "user", content: "continue" },
     ] as any[];
 
-    const pruned = pruneMessages(messages, indexer);
+    const pruned = pruneMessages(messages, indexer, "agentic-auto");
     const injected = injectSummaries(pruned, indexer, "agentic-auto");
 
     expect(injected.map((m: any) => m.role)).toEqual([
@@ -124,7 +152,11 @@ describe("injectSummaries for agentic-auto", () => {
       toolResult("tc1", "full original output"),
     ] as any[];
 
-    const once = injectSummaries(pruneMessages(messages, indexer), indexer, "agentic-auto");
+    const once = injectSummaries(
+      pruneMessages(messages, indexer, "agentic-auto"),
+      indexer,
+      "agentic-auto",
+    );
     const twice = injectSummaries(once, indexer, "agentic-auto");
 
     expect(twice.filter((m: any) => m.role === "custom" && m.customType === CUSTOM_TYPE_SUMMARY)).toHaveLength(1);
@@ -166,7 +198,11 @@ describe("injectSummaries for agentic-auto", () => {
       { role: "user", content: "tail" },
     ] as any[];
 
-    const result = injectSummaries(pruneMessages(messages, indexer), indexer, "agentic-auto");
+    const result = injectSummaries(
+      pruneMessages(messages, indexer, "agentic-auto"),
+      indexer,
+      "agentic-auto",
+    );
     const roles = result.map((m: any) => (m.role === "custom" ? `custom:${m.content}` : m.role));
 
     expect(roles).toEqual([
@@ -181,6 +217,174 @@ describe("injectSummaries for agentic-auto", () => {
     // Second pass must not stack duplicates
     const again = injectSummaries(result, indexer, "agentic-auto");
     expect(again.filter((m: any) => m.customType === CUSTOM_TYPE_SUMMARY)).toHaveLength(2);
+  });
+
+  test("summary is not injected when its toolCalls are no longer in context", () => {
+    const indexer = new ToolCallIndexer();
+    indexTool(indexer, "tc1");
+    recordSummary(indexer, "compacted summary", ["tc1"]);
+
+    const messages = [{ role: "user", content: "new work after compaction" }] as any[];
+    const result = injectSummaries(messages, indexer, "agentic-auto");
+
+    expect(result).toBe(messages);
+    expect(result).toEqual([{ role: "user", content: "new work after compaction" }]);
+  });
+
+  test("partially indexed batch keeps original toolResults and does not inject its summary", () => {
+    const indexer = new ToolCallIndexer();
+    indexTool(indexer, "tc1");
+    recordSummary(indexer, "partial summary", ["tc1", "tc2"]);
+
+    const messages = [
+      assistantWithCalls("tc1", "tc2"),
+      toolResult("tc1", "out-1"),
+      toolResult("tc2", "out-2"),
+    ] as any[];
+
+    const pruned = pruneMessages(messages, indexer, "agentic-auto");
+    const result = injectSummaries(pruned, indexer, "agentic-auto");
+
+    expect(result).toEqual(messages);
+    expect(result.filter((msg: any) => msg.role === "toolResult")).toHaveLength(2);
+    expect(result.some((msg: any) => msg.customType === CUSTOM_TYPE_SUMMARY)).toBe(false);
+  });
+
+  test("orphan persisted summary is removed until its whole batch index commits", () => {
+    const indexer = new ToolCallIndexer();
+    indexTool(indexer, "tc1");
+    recordSummary(indexer, "orphan summary", ["tc1", "tc2"]);
+
+    const orphan = {
+      role: "custom" as const,
+      customType: CUSTOM_TYPE_SUMMARY,
+      content: "orphan summary",
+      display: false,
+      details: {
+        toolCallRefs: [
+          { shortId: "t1", toolCallId: "tc1" },
+          { shortId: "t2", toolCallId: "tc2" },
+        ],
+      },
+    };
+    const messages = [
+      assistantWithCalls("tc1", "tc2"),
+      toolResult("tc1", "out-1"),
+      toolResult("tc2", "out-2"),
+      orphan,
+    ] as any[];
+
+    const result = injectSummaries(
+      pruneMessages(messages, indexer, "agentic-auto"),
+      indexer,
+      "agentic-auto",
+    );
+
+    expect(result).toEqual(messages.slice(0, -1));
+  });
+
+  test("session reconstruction restores summary content and relocates it near the toolCall", () => {
+    const details = {
+      toolCallRefs: [{ shortId: "t7", toolCallId: "tc1" }],
+    };
+    const persisted = {
+      role: "custom" as const,
+      customType: CUSTOM_TYPE_SUMMARY,
+      content: "restored summary",
+      display: false,
+      details,
+    };
+    const indexer = new ToolCallIndexer();
+    indexer.reconstructFromSession({
+      sessionManager: {
+        getBranch: () => [
+          {
+            type: "custom_message",
+            customType: CUSTOM_TYPE_SUMMARY,
+            content: "restored summary",
+            details,
+          },
+          {
+            type: "custom",
+            customType: CUSTOM_TYPE_INDEX,
+            data: {
+              toolCalls: [
+                {
+                  toolCallId: "tc1",
+                  toolName: "bash",
+                  args: {},
+                  resultText: "full output",
+                  isError: false,
+                  turnIndex: 1,
+                  timestamp: 1,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    } as any);
+
+    const messages = [
+      assistantWithCalls("tc1"),
+      { role: "user", content: "later" },
+      persisted,
+    ] as any[];
+    const result = injectSummaries(
+      pruneMessages(messages, indexer, "agentic-auto"),
+      indexer,
+      "agentic-auto",
+    );
+
+    expect(result).toEqual([messages[0], persisted, messages[1]]);
+    expect(indexer.resolveToolCallId("t7")).toBe("tc1");
+  });
+
+  test("retry replaces an earlier summary for the same toolCall batch", () => {
+    const indexer = new ToolCallIndexer();
+    indexTool(indexer, "tc1");
+    recordSummary(indexer, "stale summary", ["tc1"]);
+    recordSummary(indexer, "fresh summary", ["tc1"]);
+
+    const result = injectSummaries(
+      [assistantWithCalls("tc1")],
+      indexer,
+      "agentic-auto",
+    );
+
+    expect(result[1]).toMatchObject({
+      customType: CUSTOM_TYPE_SUMMARY,
+      content: "fresh summary",
+    });
+  });
+
+  test("persisted summary is moved back near its toolCall after session rebuild", () => {
+    const indexer = new ToolCallIndexer();
+    indexTool(indexer, "tc1");
+    recordSummary(indexer, "batch-1 summary", ["tc1"]);
+
+    const persisted = {
+      role: "custom" as const,
+      customType: CUSTOM_TYPE_SUMMARY,
+      content: "batch-1 summary",
+      display: false,
+      details: {
+        toolCallRefs: [{ shortId: "t1", toolCallId: "tc1" }],
+      },
+    };
+    const messages = [
+      assistantWithCalls("tc1"),
+      { role: "user", content: "later" },
+      persisted,
+    ] as any[];
+
+    const result = injectSummaries(messages, indexer, "agentic-auto");
+
+    expect(result).toEqual([
+      messages[0],
+      persisted,
+      messages[1],
+    ]);
   });
 
   test("summary already present in messages is not re-inserted", () => {

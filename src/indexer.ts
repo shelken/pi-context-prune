@@ -4,6 +4,7 @@ import { CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY } from "./types.js";
 import {
   buildShortToolCallRefs,
   normalizeSummaryToolCallRefs,
+  summaryToolCallKey,
   type SummaryToolCallRef,
 } from "./summary-refs.js";
 
@@ -12,10 +13,6 @@ export interface StoredSummary {
   content: string;
   toolCallIds: string[];
   details: unknown;
-}
-
-function summaryKey(toolCallIds: string[]): string {
-  return toolCallIds.slice().sort().join("\0");
 }
 
 export class ToolCallIndexer {
@@ -88,21 +85,27 @@ export class ToolCallIndexer {
 
   /**
    * Store a batch summary for later context injection (agentic-auto).
-   * Also registers short-id aliases from details. Dedupes by toolCallId set.
+   * Also registers short-id aliases from details. Latest retry wins by toolCallId set.
    */
   recordSummary(content: string, details: unknown): void {
     const refs = normalizeSummaryToolCallRefs(details);
     this.registerSummaryRefs(refs);
     const toolCallIds = refs.map((r) => r.toolCallId);
     if (toolCallIds.length === 0 || !content) return;
-    const key = summaryKey(toolCallIds);
-    if (this.summaries.has(key)) return;
+    const key = summaryToolCallKey(toolCallIds);
     this.summaries.set(key, { content, toolCallIds, details });
   }
 
   /** All stored batch summaries (order of first insertion). */
   getSummaries(): StoredSummary[] {
     return [...this.summaries.values()];
+  }
+
+  /** Summaries whose complete batch index is available for safe prune/inject. */
+  getCommittedSummaries(): StoredSummary[] {
+    return this.getSummaries().filter((summary) =>
+      summary.toolCallIds.every((toolCallId) => this.index.has(toolCallId)),
+    );
   }
 
   /**
@@ -164,10 +167,12 @@ export class ToolCallIndexer {
         turnIndex: batch.turnIndex,
         timestamp: batch.timestamp,
       };
-      this.index.set(record.toolCallId, record);
       records.push(record);
     }
 
     pi.appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: records } as IndexEntryData);
+    for (const record of records) {
+      this.index.set(record.toolCallId, record);
+    }
   }
 }

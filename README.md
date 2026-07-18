@@ -23,7 +23,7 @@ As long agent sessions grow, every tool call adds token-heavy output to the cont
 
 1. **Detects** when an assistant turn finishes calling tools (`turn_end`)
 2. **Summarizes** that batch of tool calls using your configured model
-3. **Injects** a compact hidden summary message before the next LLM call (`deliverAs: "steer"`)
+3. **Injects** a compact hidden summary before the next LLM call (`agentic-auto` injects during context build; other runtime triggers use Pi message delivery)
 4. **Prunes** the original verbose tool outputs from future context (`context` event)
 5. **Preserves** every original output in the session index — retrievable at any time via `context_tree_query`
 
@@ -317,7 +317,8 @@ flushPending()
   └─► statsAccum.add()/persist() accumulate token/cost stats for the summarizer call
 
 context (enabled + index non-empty)
-  └─► pruneMessages()            remove toolResult messages in the index
+  ├─► pruneMessages()            remove safely committed toolResult messages
+  └─► agentic-auto: injectSummaries() normalizes committed summaries near their toolCalls
 
 before_agent_start (agentic-auto mode)
   └─► append AGENTIC_AUTO_SYSTEM_PROMPT to system prompt

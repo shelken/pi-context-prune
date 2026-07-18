@@ -1,39 +1,42 @@
 import type { ToolCallIndexer } from "./indexer.js";
-import { normalizeSummaryToolCallRefs } from "./summary-refs.js";
+import { normalizeSummaryToolCallRefs, summaryToolCallKey } from "./summary-refs.js";
 import { CUSTOM_TYPE_SUMMARY, type PruneOn } from "./types.js";
 
 /**
  * Filters the `context` event message array.
- * Removes ToolResultMessage entries where toolCallId is in the index.
- * Keeps ALL other messages including AssistantMessages with tool-call blocks.
+ * Other modes remove indexed ToolResultMessages as before; agentic-auto waits
+ * until the covering summary's complete batch index is committed.
  */
-export function pruneMessages(messages: any[], indexer: ToolCallIndexer): any[] {
-  return messages.filter((msg) => {
-    // Only remove toolResult messages that have been summarized
-    if (msg.role === "toolResult" && indexer.isSummarized(msg.toolCallId)) {
-      return false;
-    }
-    return true;
-  });
-}
+export function pruneMessages(
+  messages: any[],
+  indexer: ToolCallIndexer,
+  pruneOn?: PruneOn,
+): any[] {
+  const committedToolCallIds =
+    pruneOn === "agentic-auto"
+      ? new Set(indexer.getCommittedSummaries().flatMap((summary) => summary.toolCallIds))
+      : undefined;
 
-function summaryKeyFromIds(toolCallIds: string[]): string {
-  return toolCallIds.slice().sort().join("\0");
+  return messages.filter((msg) => {
+    if (msg.role !== "toolResult" || !indexer.isSummarized(msg.toolCallId)) {
+      return true;
+    }
+    return committedToolCallIds ? !committedToolCallIds.has(msg.toolCallId) : false;
+  });
 }
 
 function summaryKeyFromMessage(msg: any): string | null {
   if (msg?.role !== "custom" || msg.customType !== CUSTOM_TYPE_SUMMARY) return null;
   const ids = normalizeSummaryToolCallRefs(msg.details).map((r) => r.toolCallId);
   if (ids.length === 0) return null;
-  return summaryKeyFromIds(ids);
+  return summaryToolCallKey(ids);
 }
 
 /**
  * Find where a batch summary should sit: after the first assistant toolCall
  * block it covers (and any remaining toolResults that still follow it).
- * Falls back to end-of-list when the toolCall blocks are gone.
  */
-function findSummaryInsertIndex(messages: any[], toolCallIds: string[]): number {
+function findSummaryInsertIndex(messages: any[], toolCallIds: string[]): number | undefined {
   const idSet = new Set(toolCallIds);
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -43,16 +46,22 @@ function findSummaryInsertIndex(messages: any[], toolCallIds: string[]): number 
     );
     if (!has) continue;
     let j = i + 1;
-    while (j < messages.length && messages[j]?.role === "toolResult") j++;
+    while (
+      j < messages.length &&
+      (messages[j]?.role === "toolResult" ||
+        (messages[j]?.role === "custom" && messages[j]?.customType === CUSTOM_TYPE_SUMMARY))
+    ) {
+      j++;
+    }
     return j;
   }
-  return messages.length;
+  return undefined;
 }
 
 /**
- * agentic-auto only: inject stored batch summaries near the pruned toolCalls.
- * Pure function — no IO. Idempotent: skips any summary whose toolCallId set is
- * already present as a context-prune-summary custom message.
+ * agentic-auto only: normalize stored batch summaries near pruned toolCalls.
+ * Pure function — no IO. Existing managed summaries are removed first, then
+ * only fully committed summaries with a covered toolCall still in context return.
  *
  * Why here (not flush/steer): context_prune runs while isStreaming, so steer
  * would re-wake the agent. Injecting on every LLM context build is timing-safe.
@@ -60,41 +69,50 @@ function findSummaryInsertIndex(messages: any[], toolCallIds: string[]): number 
 export function injectSummaries(
   messages: any[],
   indexer: ToolCallIndexer,
-  pruneOn: PruneOn | string,
+  pruneOn: PruneOn,
 ): any[] {
   if (pruneOn !== "agentic-auto") return messages;
 
-  const summaries = indexer.getSummaries();
-  if (summaries.length === 0) return messages;
+  const storedSummaries = indexer.getSummaries();
+  if (storedSummaries.length === 0) return messages;
 
-  const existing = new Set<string>();
-  for (const msg of messages) {
+  const storedKeys = new Set(
+    storedSummaries.map((summary) => summaryToolCallKey(summary.toolCallIds)),
+  );
+  const existingByKey = new Map<string, any>();
+  const result = messages.filter((msg) => {
     const key = summaryKeyFromMessage(msg);
-    if (key) existing.add(key);
-  }
+    if (!key || !storedKeys.has(key)) return true;
+    if (!existingByKey.has(key)) existingByKey.set(key, msg);
+    return false;
+  });
+  const committedByKey = new Map(
+    indexer
+      .getCommittedSummaries()
+      .map((summary) => [summaryToolCallKey(summary.toolCallIds), summary]),
+  );
 
-  let result = messages;
-  let copied = false;
-
-  for (const summary of summaries) {
-    const key = summaryKeyFromIds(summary.toolCallIds);
-    if (existing.has(key)) continue;
-
-    if (!copied) {
-      result = messages.slice();
-      copied = true;
-    }
-
+  for (const [key, summary] of committedByKey) {
     const insertAt = findSummaryInsertIndex(result, summary.toolCallIds);
-    result.splice(insertAt, 0, {
-      role: "custom",
-      customType: CUSTOM_TYPE_SUMMARY,
-      content: summary.content,
-      display: false,
-      details: summary.details,
-    });
-    existing.add(key);
+    if (insertAt === undefined) continue;
+
+    const existing = existingByKey.get(key);
+    result.splice(
+      insertAt,
+      0,
+      existing?.content === summary.content
+        ? existing
+        : {
+            role: "custom",
+            customType: CUSTOM_TYPE_SUMMARY,
+            content: summary.content,
+            display: false,
+            details: summary.details,
+          },
+    );
   }
 
-  return result;
+  const unchanged =
+    result.length === messages.length && result.every((msg, index) => msg === messages[index]);
+  return unchanged ? messages : result;
 }
