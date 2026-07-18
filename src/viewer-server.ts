@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rename, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
@@ -16,11 +16,9 @@ export function getViewerPort(): number {
   if (raw && /^\d+$/.test(raw)) return Number(raw);
   return 17342;
 }
-export const VIEWER_PORT = getViewerPort();
 export function getViewerUrl(): string {
   return `http://127.0.0.1:${getViewerPort()}/`;
 }
-export const VIEWER_URL = getViewerUrl();
 /** Bump when HTML shell changes; used to detect a stale in-memory server from an older pi process. */
 export const VIEWER_UI_MARKER = 'data-pruner-viewer="3"';
 
@@ -40,11 +38,8 @@ export function getViewerOriginalsPath(): string {
 export function getViewerPagePath(): string {
   return join(viewerDir(), "viewer.html");
 }
-// Back-compat exports (resolved at call time via helpers where possible).
-export const VIEWER_SNAPSHOT_PATH = getViewerSnapshotPath();
-export const VIEWER_PAGE_PATH = getViewerPagePath();
 
-// Last-tab-close: page posts /api/heartbeat every 3s + sendBeacon(/api/bye) on pagehide.
+// Last-tab-close: page posts /api/heartbeat every 5s + sendBeacon(/api/bye) on pagehide.
 // Idle must be long — short timeouts kill the server mid-load (1MB+ JSON) and leave the tab stuck on "loading…".
 // Use node:http (not Bun.serve): Pi loads extensions under Node.
 const IDLE_MS = 30 * 60_000;
@@ -109,18 +104,36 @@ export async function publishViewerDocument(doc: ViewerDocument): Promise<void> 
   const origTmp = `${origPath}.tmp`;
   await writeFile(origTmp, JSON.stringify(originals), "utf-8");
   await rename(origTmp, origPath);
+  // Drop cache so next expand sees this publish even if mtime resolution is coarse.
+  originalsCache = null;
+}
+
+// Cache full originals map by file mtime — /api/original used to re-parse the whole JSON per expand.
+type OriginalsCache = { mtimeMs: number; map: ViewerOriginals };
+let originalsCache: OriginalsCache | null = null;
+
+async function readOriginalsMap(): Promise<ViewerOriginals | null> {
+  try {
+    const path = getViewerOriginalsPath();
+    const st = await stat(path);
+    if (originalsCache && originalsCache.mtimeMs === st.mtimeMs) {
+      return originalsCache.map;
+    }
+    const raw = await readFile(path, "utf-8");
+    const map = JSON.parse(raw) as ViewerOriginals;
+    originalsCache = { mtimeMs: st.mtimeMs, map };
+    return map;
+  } catch {
+    originalsCache = null;
+    return null;
+  }
 }
 
 async function readOriginalBody(id: string): Promise<string | null> {
   if (!id) return null;
-  try {
-    const raw = await readFile(getViewerOriginalsPath(), "utf-8");
-    const map = JSON.parse(raw) as ViewerOriginals;
-    if (map && typeof map[id] === "string") return map[id];
-    return null;
-  } catch {
-    return null;
-  }
+  const map = await readOriginalsMap();
+  if (!map || typeof map[id] !== "string") return null;
+  return map[id];
 }
 
 async function readLatestSnapshot(): Promise<string> {
@@ -132,7 +145,14 @@ async function readLatestSnapshot(): Promise<string> {
       sessionLabel: "empty",
       timestamp: 0,
       rows: [],
-      stats: { messageCount: 0, prunedToolCount: 0, summaryCount: 0, branchEntryCount: 0 },
+      stats: {
+        messageCount: 0,
+        totalMessageCount: 0,
+        prunedToolCount: 0,
+        summaryCount: 0,
+        branchEntryCount: 0,
+        truncated: false,
+      },
     });
   }
 }

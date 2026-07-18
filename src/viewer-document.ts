@@ -47,11 +47,16 @@ export interface ViewerDocument {
   timestamp: number;
   rows: ViewerRow[];
   stats: {
+    /** Rows included in this snapshot (after windowing). */
     messageCount: number;
+    /** Rows before windowing (full agent-visible timeline length). */
+    totalMessageCount: number;
     prunedToolCount: number;
     summaryCount: number;
     /** Raw session branch entries fed into the builder (for empty-state diagnosis). */
     branchEntryCount: number;
+    /** True when older rows were dropped to keep the page responsive. */
+    truncated: boolean;
   };
 }
 
@@ -60,7 +65,34 @@ export type ViewerOriginals = Record<string, string>;
 
 const PREVIEW_MAX = 140;
 /** Cap row body in the snapshot so /api/latest stays browser-friendly. */
-const BODY_MAX = 48_000;
+const BODY_MAX = 8_000;
+/** Never ship the whole session — only the latest window. Older rows stay in session files. */
+export const VIEWER_ROW_WINDOW = 80;
+
+/** Minimal sessionManager surface used by the web viewer. */
+export type ViewerEntrySource = {
+  buildContextEntries?: () => unknown[] | null | undefined;
+  getBranch?: () => unknown[] | null | undefined;
+  /** Intentionally unused — full session tree mixes sibling branches. */
+  getEntries?: () => unknown[] | null | undefined;
+};
+
+/**
+ * Resolve the agent-visible session path for the viewer.
+ * Prefer buildContextEntries (compaction-aware). Never fall back to getEntries()
+ * (that returns the whole tree, including other branches).
+ */
+export function resolveViewerEntries(sm: ViewerEntrySource): unknown[] {
+  if (typeof sm.buildContextEntries === "function") {
+    const ctx = sm.buildContextEntries();
+    return Array.isArray(ctx) ? ctx : [];
+  }
+  if (typeof sm.getBranch === "function") {
+    const branch = sm.getBranch();
+    return Array.isArray(branch) ? branch : [];
+  }
+  return [];
+}
 
 function previewOf(text: string): string {
   const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
@@ -133,6 +165,14 @@ export function buildViewerDocument(
   for (const raw of branch) {
     if (!raw || typeof raw !== "object") continue;
     const entry = raw as Record<string, unknown>;
+
+    // Compaction / branch_summary appear on buildContextEntries() and convert to user text for the LLM.
+    if (entry.type === "compaction" || entry.type === "branch_summary") {
+      const summary = typeof entry.summary === "string" ? entry.summary : "";
+      const label = entry.type === "compaction" ? "compaction" : "branch_summary";
+      rows.push(makeRow(`row-${seq++}`, "other", label, summary));
+      continue;
+    }
 
     if (entry.type === "custom_message" && entry.customType === CUSTOM_TYPE_SUMMARY) {
       const stored = typeof entry.content === "string" ? entry.content : "";
@@ -208,16 +248,31 @@ export function buildViewerDocument(
     }
   }
 
+  const totalMessageCount = rows.length;
+  const truncated = totalMessageCount > VIEWER_ROW_WINDOW;
+  const windowed = truncated ? rows.slice(-VIEWER_ROW_WINDOW) : rows;
+  // Counts in the window only (what the UI actually shows).
+  let windowSummaries = 0;
+  let windowPruned = 0;
+  for (const row of windowed) {
+    if (row.kind === "summary") {
+      windowSummaries += 1;
+      windowPruned += row.linkedTools?.length ?? 0;
+    }
+  }
+
   return {
     sessionId: meta.sessionId,
     sessionLabel: meta.sessionLabel,
     timestamp: meta.timestamp,
-    rows,
+    rows: windowed,
     stats: {
-      messageCount: rows.length,
-      prunedToolCount,
-      summaryCount,
+      messageCount: windowed.length,
+      totalMessageCount,
+      prunedToolCount: windowPruned,
+      summaryCount: windowSummaries,
       branchEntryCount: branch.length,
+      truncated,
     },
   };
 }
@@ -234,7 +289,8 @@ export function stripOriginalsForWire(doc: ViewerDocument): {
   const rows = doc.rows.map((row) => {
     if (!row.linkedTools || row.linkedTools.length === 0) return row;
     const linkedTools = row.linkedTools.map((t) => {
-      if (t.originalBody) originals[t.toolCallId] = t.originalBody;
+      // Keep empty-string originals (valid tool output); only skip when id is missing.
+      if (t.toolCallId) originals[t.toolCallId] = t.originalBody;
       return { ...t, originalBody: "" };
     });
     return { ...row, linkedTools };

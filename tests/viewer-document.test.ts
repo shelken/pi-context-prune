@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ToolCallIndexer } from "../src/indexer.ts";
-import { buildViewerDocument } from "../src/viewer-document.ts";
+import { buildViewerDocument, resolveViewerEntries } from "../src/viewer-document.ts";
 import type { ToolCallRecord } from "../src/types.ts";
 import { CUSTOM_TYPE_SUMMARY } from "../src/types.ts";
 
@@ -82,9 +82,11 @@ describe("buildViewerDocument", () => {
     expect(doc.rows).toEqual([]);
     expect(doc.stats).toEqual({
       messageCount: 0,
+      totalMessageCount: 0,
       prunedToolCount: 0,
       summaryCount: 0,
       branchEntryCount: 0,
+      truncated: false,
     });
   });
 
@@ -211,5 +213,77 @@ describe("buildViewerDocument", () => {
     expect(doc.rows[0].preview.length).toBeLessThan(long.length);
     expect(doc.rows[0].preview).toContain("line1");
     expect(doc.rows[0].body).toBe(long);
+  });
+
+  test("keeps only the latest VIEWER_ROW_WINDOW rows", () => {
+    const branch: unknown[] = [];
+    for (let i = 0; i < 120; i++) {
+      branch.push(userMsg("msg-" + i));
+    }
+    const doc = buildViewerDocument(branch, indexerWith([]), {
+      sessionId: "big",
+      sessionLabel: "big",
+      timestamp: 1,
+    });
+    expect(doc.stats.totalMessageCount).toBe(120);
+    expect(doc.stats.messageCount).toBe(80);
+    expect(doc.stats.truncated).toBe(true);
+    expect(doc.rows).toHaveLength(80);
+    expect(doc.rows[0]?.preview).toContain("msg-40");
+    expect(doc.rows[79]?.preview).toContain("msg-119");
+  });
+
+  test("includes compaction and branch_summary entries from context path", () => {
+    const branch = [
+      { type: "compaction", summary: "Earlier turns compacted away." },
+      userMsg("continue"),
+      { type: "branch_summary", summary: "Switched from other branch." },
+    ];
+    const doc = buildViewerDocument(branch, indexerWith([]), {
+      sessionId: "c",
+      sessionLabel: "c",
+      timestamp: 1,
+    });
+    expect(doc.rows.map((r) => r.roleLabel)).toEqual([
+      "compaction",
+      "user",
+      "branch_summary",
+    ]);
+    expect(doc.rows[0]?.body).toContain("compacted away");
+    expect(doc.rows[2]?.body).toContain("other branch");
+  });
+});
+
+describe("resolveViewerEntries", () => {
+  test("prefers buildContextEntries over getBranch", () => {
+    const entries = resolveViewerEntries({
+      buildContextEntries: () => [userMsg("from-context")],
+      getBranch: () => [userMsg("from-branch"), userMsg("extra")],
+      getEntries: () => [userMsg("from-all-entries")],
+    });
+    expect(entries).toHaveLength(1);
+    expect((entries[0] as { message: { content: string } }).message.content).toBe(
+      "from-context",
+    );
+  });
+
+  test("never uses getEntries even when context and branch are empty", () => {
+    const entries = resolveViewerEntries({
+      buildContextEntries: () => [],
+      getBranch: () => [],
+      getEntries: () => [userMsg("sibling-branch-pollution")],
+    });
+    expect(entries).toEqual([]);
+  });
+
+  test("falls back to getBranch only when buildContextEntries is missing", () => {
+    const entries = resolveViewerEntries({
+      getBranch: () => [userMsg("branch-only")],
+      getEntries: () => [userMsg("all")],
+    });
+    expect(entries).toHaveLength(1);
+    expect((entries[0] as { message: { content: string } }).message.content).toBe(
+      "branch-only",
+    );
   });
 });

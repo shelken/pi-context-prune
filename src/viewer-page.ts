@@ -339,7 +339,16 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
       .replace(/__([^_]+)__/g, "<strong>$1</strong>")
       .replace(/(?<!\\*)\\*([^*]+)\\*(?!\\*)/g, "<em>$1</em>")
       .replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, (_, label, href) => {
-        const safe = /^(https?:|\/|#)/i.test(href) ? href : "#";
+        // No regex here: template-literal backslash rules strip \/ and break /.../ literals.
+        const h = String(href || "");
+        const lower = h.toLowerCase();
+        const safe =
+          lower.startsWith("https://") ||
+          lower.startsWith("http://") ||
+          h.startsWith("/") ||
+          h.startsWith("#")
+            ? h
+            : "#";
         return '<a href="' + safe + '" rel="noreferrer noopener">' + label + "</a>";
       })
 
@@ -450,13 +459,17 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
   }
 
   function renderShell(doc) {
+    const shown = doc.stats?.messageCount ?? (doc.rows || []).length;
+    const total = doc.stats?.totalMessageCount ?? shown;
+    const trunc = doc.stats?.truncated
+      ? " · showing last " + shown + " of " + total
+      : " · " + shown + " rows";
     meta.textContent =
       (doc.sessionLabel || doc.sessionId || "session") +
       " · " +
       new Date(doc.timestamp).toLocaleString() +
+      trunc +
       " · " +
-      (doc.stats?.messageCount ?? 0) +
-      " rows · " +
       (doc.stats?.summaryCount ?? 0) +
       " summaries · pruned " +
       (doc.stats?.prunedToolCount ?? 0);
@@ -474,6 +487,7 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
       return;
     }
 
+    // Window is already ≤ VIEWER_ROW_WINDOW; single paint avoids rAF re-entry races on poll.
     const parts = new Array(rows.length);
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -507,7 +521,6 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
     }
     list.innerHTML = parts.join("");
 
-    // Re-hydrate bodies for rows that were open before a snapshot refresh.
     for (const id of openIds) {
       const article = list.querySelector('[data-id="' + CSS.escape(id) + '"]');
       const row = rowData.get(id);

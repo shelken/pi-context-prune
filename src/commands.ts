@@ -17,7 +17,7 @@ import { MultiBatchLoaderOverlay } from "./multi-batch-loader.js";
 import { runCancellableFlush } from "./cancellable-flush.js";
 import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
-import { buildViewerDocument } from "./viewer-document.js";
+import { buildViewerDocument, resolveViewerEntries } from "./viewer-document.js";
 import { openViewer, publishViewerDocument } from "./viewer-server.js";
 
 /**
@@ -490,30 +490,27 @@ export function registerCommands(
         case "tree": {
           try {
             const sm = ctx.sessionManager as {
-              getBranch?: () => unknown[];
               buildContextEntries?: () => unknown[];
-              getEntries?: () => unknown[];
+              getBranch?: () => unknown[];
               getLeafId?: () => string | null;
             };
-            // Prefer leaf path; fall back if leaf is unset / empty (common after reload).
-            let branch: unknown[] =
-              typeof sm.getBranch === "function" ? sm.getBranch() ?? [] : [];
-            if (branch.length === 0 && typeof sm.buildContextEntries === "function") {
-              branch = sm.buildContextEntries() ?? [];
-            }
-            if (branch.length === 0 && typeof sm.getEntries === "function") {
-              branch = sm.getEntries() ?? [];
-            }
+            // Compaction-aware context path only — never getEntries() (sibling branches).
+            const branch = resolveViewerEntries(sm);
             const meta = sessionMetaFromContext(ctx);
             const doc = buildViewerDocument(branch, indexer, meta);
             await publishViewerDocument(doc);
-            // Do not forceOpen: if the tab is already up it polls latest; avoid spam tabs.
-            const { url, openedBrowser, alreadyRunning } = await openViewer();
+            // forceOpen: user ran the command; server-up-but-no-tab used to silently skip browser.
+            const { url, openedBrowser, alreadyRunning } = await openViewer({
+              forceOpen: true,
+            });
             const action = openedBrowser ? "opened" : alreadyRunning ? "updated" : "ready";
             const leaf =
               typeof sm.getLeafId === "function" ? sm.getLeafId() ?? "null" : "?";
+            const trunc = doc.stats.truncated
+              ? `, showing last ${doc.stats.messageCount}/${doc.stats.totalMessageCount}`
+              : `, ${doc.stats.messageCount} rows`;
             ctx.ui.notify(
-              `pruner tree: ${action} ${url} (${doc.stats.messageCount} rows, branch ${doc.stats.branchEntryCount}, leaf ${leaf})`,
+              `pruner tree: ${action} ${url}${trunc}, entries ${doc.stats.branchEntryCount}, leaf ${leaf}`,
               doc.stats.messageCount === 0 ? "warning" : "info",
             );
           } catch (err) {

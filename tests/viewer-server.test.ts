@@ -120,6 +120,14 @@ describe("viewer server (no browser)", () => {
           originalChars: 20,
           isError: false,
         },
+        {
+          shortId: "t2",
+          toolCallId: "call-empty",
+          toolName: "bash",
+          originalBody: "",
+          originalChars: 0,
+          isError: false,
+        },
       ],
     });
     await publishViewerDocument(doc);
@@ -131,5 +139,29 @@ describe("viewer server (no browser)", () => {
 
     const orig = await fetch(`${base}api/original?id=call-xyz`).then((r) => r.json());
     expect(orig.text).toBe("FULL ORIGINAL OUTPUT");
+
+    // Empty string is a valid original (not missing).
+    const empty = await fetch(`${base}api/original?id=call-empty`).then((r) => r.json());
+    expect(empty.text).toBe("");
+
+    // Second expand still hits (mtime cache must not break after publish).
+    const again = await fetch(`${base}api/original?id=call-xyz`).then((r) => r.json());
+    expect(again.text).toBe("FULL ORIGINAL OUTPUT");
+  });
+
+  test("already-running openViewer with forceOpen still reports alreadyRunning", async () => {
+    await publishViewerDocument(
+      buildViewerDocument([], new ToolCallIndexer(), {
+        sessionId: "force",
+        sessionLabel: "force",
+        timestamp: 1,
+      }),
+    );
+    const first = await openViewer({ openBrowser: false });
+    expect(first.alreadyRunning).toBe(false);
+    const second = await openViewer({ openBrowser: false, forceOpen: true });
+    expect(second.alreadyRunning).toBe(true);
+    // openBrowser:false always wins over forceOpen for tests.
+    expect(second.openedBrowser).toBe(false);
   });
 });
