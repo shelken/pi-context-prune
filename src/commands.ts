@@ -7,9 +7,16 @@ import {
   BATCHING_MODES,
   STATUS_WIDGET_ID,
   SUMMARIZER_THINKING_LEVELS,
+  FLUSH_CONCURRENCY_MIN,
+  FLUSH_CONCURRENCY_MAX,
+  DEFAULT_CONFIG,
 } from "./types.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { saveConfig } from "./config.js";
+import {
+  saveConfig,
+  normalizeFlushConcurrency,
+  normalizeMinRawCharsToSummarize,
+} from "./config.js";
 import { formatTokens, formatCost } from "./stats.js";
 import { Container, Text, SettingsList, type SettingItem } from "@earendil-works/pi-tui";
 import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
@@ -80,6 +87,8 @@ const SUBCOMMANDS = [
   { value: "thinking", label: "thinking  — show or set the summarizer thinking level" },
   { value: "prune-on", label: "prune-on  — show or set the trigger mode" },
   { value: "batching", label: "batching  — show or set the batching mode (turn / agent-message)" },
+  { value: "concurrency", label: "concurrency — show or set /pruner now parallel batch limit" },
+  { value: "min-chars", label: "min-chars — show or set min raw chars before summarizing" },
   { value: "stats",   label: "stats     — show cumulative summarizer token/cost stats" },
   { value: "tree",    label: "tree      — open web viewer of agent-visible conversation" },
   { value: "now",     label: "now       — flush pending tool calls immediately (cancellable overlay)" },
@@ -153,6 +162,24 @@ function batchingModeDescription(mode: ContextPruneConfig["batchingMode"]): stri
   return "Per agent message: merges all assistant turns between two user messages into one summary. Fewer, larger summaries per conversation exchange.";
 }
 
+function flushConcurrencyDescription(n: number): string {
+  return `Max parallel summarizer calls for /pruner now only (1–16). Currently ${n}. Auto flush paths ignore this.`;
+}
+
+function minRawCharsDescription(n: number): string {
+  if (n === 0) {
+    return "Min raw tool-result chars before summarizing. Currently 0 (disabled — every batch is sent)."
+  }
+  return `Min raw tool-result chars before summarizing. Currently ${n}. Batches below this skip the LLM (keep originals, advance frontier).`;
+}
+
+/** Parse CLI int; returns null if not a plain integer string. */
+function parseCliInt(raw: string): number | null {
+  if (!/^-?\d+$/.test(raw.trim())) return null;
+  const n = Number(raw.trim());
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 function remindUnprunedCountDescription(config: ContextPruneConfig): string {
   const base = config.remindUnprunedCount ? "ON" : "OFF";
   if (config.pruneOn === "agentic-auto") {
@@ -215,6 +242,10 @@ Usage:
   /pruner batching                         Show or interactively pick the batching granularity
   /pruner batching turn                    One summary per assistant turn (default)
   /pruner batching agent-message           One summary per user→final-agent-message span (merges all turns in a span)
+  /pruner concurrency                      Show /pruner now flush concurrency (default 4)
+  /pruner concurrency <n>                  Set concurrency 1–16 (only affects /pruner now)
+  /pruner min-chars                        Show min raw chars gate before summarizing (default 800)
+  /pruner min-chars <n>                    Set min raw chars; 0 disables pre-skip
   /pruner stats                            Show cumulative summarizer token/cost stats
   /pruner tree                             Open local web viewer of agent-visible conversation + summaries
   /pruner now                              Flush pending tool calls immediately (Esc/q cancels)
@@ -368,6 +399,27 @@ export function registerCommands(
               currentValue: config.batchingMode,
               description: batchingModeDescription(config.batchingMode),
             },
+            {
+              id: "flushConcurrency",
+              label: "Flush concurrency",
+              values: Array.from({ length: FLUSH_CONCURRENCY_MAX - FLUSH_CONCURRENCY_MIN + 1 }, (_, i) =>
+                String(FLUSH_CONCURRENCY_MIN + i),
+              ),
+              currentValue: String(config.flushConcurrency),
+              description: flushConcurrencyDescription(config.flushConcurrency),
+            },
+            (() => {
+              const presets = ["0", "500", "800", "1000", "1500", "2000"];
+              const cur = String(config.minRawCharsToSummarize);
+              const values = presets.includes(cur) ? presets : [...presets, cur].sort((a, b) => Number(a) - Number(b));
+              return {
+                id: "minRawCharsToSummarize",
+                label: "Min raw chars",
+                values,
+                currentValue: cur,
+                description: minRawCharsDescription(config.minRawCharsToSummarize),
+              };
+            })(),
           ];
 
           let settingsList: SettingsList;
@@ -417,6 +469,14 @@ export function registerCommands(
               if (batchingItem) {
                 batchingItem.description = batchingModeDescription(newConfig.batchingMode);
               }
+            } else if (id === "flushConcurrency") {
+              newConfig.flushConcurrency = normalizeFlushConcurrency(Number(newValue));
+              const item = items.find((i) => i.id === "flushConcurrency");
+              if (item) item.description = flushConcurrencyDescription(newConfig.flushConcurrency);
+            } else if (id === "minRawCharsToSummarize") {
+              newConfig.minRawCharsToSummarize = normalizeMinRawCharsToSummarize(Number(newValue));
+              const item = items.find((i) => i.id === "minRawCharsToSummarize");
+              if (item) item.description = minRawCharsDescription(newConfig.minRawCharsToSummarize);
             }
             currentConfig.value = newConfig;
             saveConfig(newConfig);
@@ -481,7 +541,7 @@ export function registerCommands(
             ? `\n  --- summarizer ---\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`
             : "\n  (no summarizer calls yet)";
           ctx.ui.notify(
-            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
+            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  concurrency: ${cfg.flushConcurrency} (/pruner now only)\n  min-chars: ${cfg.minRawCharsToSummarize}${cfg.minRawCharsToSummarize === 0 ? " (off)" : ""}\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
           );
           break;
         }
@@ -624,6 +684,68 @@ export function registerCommands(
           }
           saveConfig(currentConfig.value);
           ctx.ui.notify(`Batching mode set to: ${batchingModeLabel(currentConfig.value.batchingMode)}`);
+          break;
+        }
+
+        // ── /pruner concurrency [n] ──
+        case "concurrency": {
+          const arg = subArgs[0];
+          if (!arg) {
+            ctx.ui.notify(
+              `Flush concurrency: ${currentConfig.value.flushConcurrency} (applies to /pruner now only; default ${DEFAULT_CONFIG.flushConcurrency})`,
+            );
+            break;
+          }
+          const parsed = parseCliInt(arg);
+          if (parsed == null) {
+            ctx.ui.notify(
+              `Invalid concurrency: ${arg}. Use an integer ${FLUSH_CONCURRENCY_MIN}–${FLUSH_CONCURRENCY_MAX}.`,
+              "warning",
+            );
+            return;
+          }
+          if (parsed < FLUSH_CONCURRENCY_MIN || parsed > FLUSH_CONCURRENCY_MAX) {
+            ctx.ui.notify(
+              `Concurrency must be ${FLUSH_CONCURRENCY_MIN}–${FLUSH_CONCURRENCY_MAX} (got ${parsed}).`,
+              "warning",
+            );
+            return;
+          }
+          currentConfig.value = {
+            ...currentConfig.value,
+            flushConcurrency: normalizeFlushConcurrency(parsed),
+          };
+          saveConfig(currentConfig.value);
+          ctx.ui.notify(`Flush concurrency set to: ${currentConfig.value.flushConcurrency}`);
+          break;
+        }
+
+        // ── /pruner min-chars [n] ──
+        case "min-chars": {
+          const arg = subArgs[0];
+          if (!arg) {
+            const n = currentConfig.value.minRawCharsToSummarize;
+            ctx.ui.notify(
+              `Min raw chars to summarize: ${n}${n === 0 ? " (disabled)" : ""} (default ${DEFAULT_CONFIG.minRawCharsToSummarize}; 0 disables)`,
+            );
+            break;
+          }
+          const parsed = parseCliInt(arg);
+          if (parsed == null || parsed < 0) {
+            ctx.ui.notify(
+              `Invalid min-chars: ${arg}. Use an integer >= 0 (0 disables).`,
+              "warning",
+            );
+            return;
+          }
+          currentConfig.value = {
+            ...currentConfig.value,
+            minRawCharsToSummarize: parsed,
+          };
+          saveConfig(currentConfig.value);
+          ctx.ui.notify(
+            `Min raw chars set to: ${currentConfig.value.minRawCharsToSummarize}${currentConfig.value.minRawCharsToSummarize === 0 ? " (disabled)" : ""}`,
+          );
           break;
         }
 

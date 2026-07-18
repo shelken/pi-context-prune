@@ -179,6 +179,16 @@ export interface ContextPruneConfig {
    *                     (all turns between two user messages are merged)
    */
   batchingMode: BatchingMode;
+  /**
+   * Max parallel summarizer calls for `/pruner now` only.
+   * Auto flush paths ignore this and stay fully parallel.
+   */
+  flushConcurrency: number;
+  /**
+   * Skip summarizer when batch raw tool-result chars are below this.
+   * `0` disables the gate. Default 800 from local session research.
+   */
+  minRawCharsToSummarize: number;
 }
 
 export const DEFAULT_CONFIG: ContextPruneConfig = {
@@ -189,7 +199,13 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   pruneOn: "agent-message",
   remindUnprunedCount: true,
   batchingMode: "turn",
+  flushConcurrency: 4,
+  minRawCharsToSummarize: 800,
 };
+
+/** Inclusive clamp range for flushConcurrency. */
+export const FLUSH_CONCURRENCY_MIN = 1;
+export const FLUSH_CONCURRENCY_MAX = 16;
 
 // ── Captured batch ─────────────────────────────────────────────────────────
 

@@ -1,5 +1,18 @@
 import type { CapturedBatch } from "./types.js";
-import { formatCharProgress } from "./stats.js";
+import { formatCharProgress, formatCompactCount } from "./stats.js";
+
+/**
+ * Footer text while flush is summarizing.
+ * A=completed batches (incl. pre-skip), B=total, C=cumulative summary chars, D=eligible raw chars.
+ */
+export function formatFlushStatusProgress(
+  completed: number,
+  total: number,
+  summaryChars: number,
+  rawChars: number,
+): string {
+  return `${completed}/${total} · ${formatCompactCount(summaryChars)}/${formatCompactCount(rawChars)}(chars)`;
+}
 
 export type PruneProgressPhase = "running" | "done" | "skipped";
 
