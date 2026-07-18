@@ -20,7 +20,7 @@ export function getViewerUrl(): string {
   return `http://127.0.0.1:${getViewerPort()}/`;
 }
 /** Bump when HTML shell changes; used to detect a stale in-memory server from an older pi process. */
-export const VIEWER_UI_MARKER = 'data-pruner-viewer="3"';
+export const VIEWER_UI_MARKER = 'data-pruner-viewer="4"';
 
 // Tests must set PI_CONTEXT_PRUNE_HOME so they never clobber the live snapshot.
 function viewerDir(): string {
