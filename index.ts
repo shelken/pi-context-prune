@@ -122,11 +122,10 @@ export default function (pi: ExtensionAPI) {
       timestamp: batch.timestamp,
     }));
 
+    appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: records } as IndexEntryData);
     for (const record of records) {
       indexer.getIndex().set(record.toolCallId, record);
     }
-
-    appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: records } as IndexEntryData);
   };
 
   // ── Helper: capture + trim + group pending batches (no LLM work) ──────────
