@@ -236,7 +236,7 @@ Accumulates cumulative token/cost stats for summarizer LLM calls and persists th
 
 ### Issue tracker
 
-Local markdown under `.scratch/<feature>/` (specs, tickets, wayfinder maps). See `docs/agents/issue-tracker.md`.
+GitHub Issues on `shelken/pi-context-prune` (`gh -R shelken/pi-context-prune`). See `docs/agents/issue-tracker.md`.
 
 ### Domain docs
 
