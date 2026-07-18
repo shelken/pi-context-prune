@@ -226,6 +226,7 @@ Accumulates cumulative token/cost stats for summarizer LLM calls and persists th
 | Web viewer for `/pruner tree` | Full agent-visible conversation timeline in a browser so developers can compare summaries vs originals; uses compaction-aware context entries, not the full session tree |
 | `resolveViewerEntries` skips `getEntries()` | `getEntries()` returns every branch; mixing sibling paths would corrupt the timeline |
 | `/pruner tree` always forceOpen browser | Server may still be up after tab close; without forceOpen the command silently "updated" with no visible tab |
+| Viewer stops only on `session_shutdown` reason `quit` | Pi also emits shutdown for `/new`/`/resume`/`/fork`/`reload`; stopping there killed the shared tree tab when switching sessions |
 | Invocation-local AbortController for `/pruner now` | Manual flush has no active agent signal. Esc/`q` abort that controller; the command waits for pending restoration before closing the overlay so no background flush remains. |
 | `userTurnGroup` field on `CapturedBatch` | Assigned in `captureUnindexedBatchesFromSession` by incrementing a counter at every user message — gives `groupBatchesByMode` a stable key to merge turns within the same conversation exchange without changing the live `turn_end` capture path. |
 | `batchingMode` is separate from `pruneOn` | `pruneOn` controls *when* to flush; `batchingMode` controls *how coarse* each summary is. Keeping them independent lets users mix e.g. `pruneOn: on-demand` with `batchingMode: agent-message` freely. |

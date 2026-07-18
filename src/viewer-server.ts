@@ -199,7 +199,7 @@ async function isViewerUiCurrent(): Promise<boolean> {
   }
 }
 
-/** Stop the in-process viewer server (session_shutdown / reload / idle). */
+/** Stop the in-process viewer server (idle / quit / tests). */
 export function stopViewerServer(): void {
   const state = globalState();
   if (state.idleTimer) {
@@ -209,6 +209,17 @@ export function stopViewerServer(): void {
   if (state.handle) {
     state.handle.stop();
     state.handle = null;
+  }
+}
+
+/**
+ * Pi fires session_shutdown on /new, /resume, /fork, reload, and quit.
+ * Only quit means the process is going away — switch/reload must keep the
+ * shared tree tab alive (handlers read HTML + latest from disk on each request).
+ */
+export function handleViewerSessionShutdown(reason: string): void {
+  if (reason === "quit") {
+    stopViewerServer();
   }
 }
 

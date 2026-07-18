@@ -22,7 +22,7 @@ import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
 import { registerQueryTool } from "./src/query-tool.js";
 import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
-import { stopViewerServer } from "./src/viewer-server.js";
+import { handleViewerSessionShutdown } from "./src/viewer-server.js";
 import { formatSummaryToolCallRefs, makeSummaryDetails, wrapSummaryForContext } from "./src/summary-refs.js";
 import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions } from "./src/types.js";
 import {
@@ -573,9 +573,10 @@ export default function (pi: ExtensionAPI) {
   // ── Register /pruner command + summary message renderer ────────────
   registerCommands(pi, currentConfig, flushPending, capturePendingBatches, syncToolActivation, () => statsAccum.getStats(), indexer);
 
-  // Viewer HTTP server lives in-process; close it on session end so reload
-  // does not leave a stale LISTEN on 17342 with old HTML handlers.
-  pi.on("session_shutdown", async () => {
-    stopViewerServer();
+  // Viewer is process-wide (fixed port). Pi emits session_shutdown on /new,
+  // /resume, /fork, reload, and quit — only quit should tear the server down.
+  // Switch/reload keep the tab; handlers re-read HTML + latest from disk.
+  pi.on("session_shutdown", async (event) => {
+    handleViewerSessionShutdown(event.reason);
   });
 }

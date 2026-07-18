@@ -16,6 +16,7 @@ const { buildViewerDocument } = await import("../src/viewer-document.ts");
 const {
   getViewerUrl,
   __stopViewerServerForTests,
+  handleViewerSessionShutdown,
   openViewer,
   publishViewerDocument,
 } = await import("../src/viewer-server.ts");
@@ -163,5 +164,29 @@ describe("viewer server (no browser)", () => {
     expect(second.alreadyRunning).toBe(true);
     // openBrowser:false always wins over forceOpen for tests.
     expect(second.openedBrowser).toBe(false);
+  });
+
+  // Repro: open tree in session A → switch to session B (session_shutdown reason=resume/new)
+  // must NOT kill the shared server (was: always stopViewerServer → tab offline).
+  test("session switch keeps server; quit stops it", async () => {
+    const base = getViewerUrl();
+    await publishViewerDocument(
+      buildViewerDocument([], new ToolCallIndexer(), {
+        sessionId: "switch",
+        sessionLabel: "switch",
+        timestamp: 1,
+      }),
+    );
+    await openViewer({ openBrowser: false });
+    expect((await fetch(`${base}api/health`)).ok).toBe(true);
+
+    for (const reason of ["resume", "new", "fork", "reload"] as const) {
+      handleViewerSessionShutdown(reason);
+      const res = await fetch(`${base}api/health`);
+      expect(res.ok).toBe(true);
+    }
+
+    handleViewerSessionShutdown("quit");
+    await expect(fetch(`${base}api/health`, { signal: AbortSignal.timeout(1000) })).rejects.toThrow();
   });
 });
