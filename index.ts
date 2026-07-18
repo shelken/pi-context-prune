@@ -16,7 +16,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
-import { resolveModel, summarizeBatch, summarizeBatches } from "./src/summarizer.js";
+import { resolveModel, summarizeBatch } from "./src/summarizer.js";
 import { ToolCallIndexer } from "./src/indexer.js";
 import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
@@ -39,9 +39,8 @@ import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
 import { handleAgentEndLifecycle } from "./src/agent-message-lifecycle.js";
-import { batchRawCharCount, shouldPreSkipBatch } from "./src/pre-skip.js";
-import { formatFlushStatusProgress } from "./src/progress-text.js";
-import { mapPool } from "./src/async-pool.js";
+import { batchRawCharCount } from "./src/pre-skip.js";
+import { runFlushSummarizePhase } from "./src/flush-summarize-phase.js";
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
@@ -148,9 +147,9 @@ export default function (pi: ExtensionAPI) {
   };
 
   // Summarizes + indexes all pending batches.
-  // When options.onProgress is provided batches are processed sequentially
-  // (one LLM call each) so the caller can update per-row UI. Otherwise all
-  // batches are summarized in parallel (one summarizeBatches call).
+  // Summarize phase: runFlushSummarizePhase — pooled (flushConcurrency) when
+  // onProgress is set (/pruner now); otherwise unbounded parallel. Pre-skips
+  // tiny batches before any LLM call.
   // Runtime delivery is used while the agent/tool loop is active so Pi can place
   // steer messages at protocol-safe boundaries. Session delivery is used only for
   // agent-message's final-message flush, where print-mode Pi may invalidate pi.*
@@ -191,98 +190,22 @@ export default function (pi: ExtensionAPI) {
       sessionManager!.appendCustomMessageEntry(CUSTOM_TYPE_SUMMARY, content, false, details);
 
     try {
-      const minRaw = currentConfig.value.minRawCharsToSummarize;
-      const preSkipFlags = batches.map((b) => shouldPreSkipBatch(b, minRaw));
-      const preSkipCountAtStart = preSkipFlags.filter(Boolean).length;
-      const eligibleRawTotal = batches.reduce(
-        (sum, b, i) => (preSkipFlags[i] ? sum : sum + batchRawCharCount(b)),
-        0,
-      );
-      const receivedByBatch = batches.map(() => 0);
-      let llmFinishedCount = 0;
-
-      const pushFlushStatus = () => {
-        const summaryChars = receivedByBatch.reduce((a, b) => a + b, 0);
-        setPruneStatusWidget(
-          ctx,
-          currentConfig.value,
-          formatFlushStatusProgress(
-            preSkipCountAtStart + llmFinishedCount,
-            batches.length,
-            summaryChars,
-            eligibleRawTotal,
-          ),
-        );
-      };
-      // Opening state: pre-skips already count as completed; C starts at 0.
-      pushFlushStatus();
-
-      const reportBatchTextProgress = (index: number, total: number, batch: CapturedBatch, receivedChars: number) => {
-        receivedByBatch[index] = receivedChars;
-        pushFlushStatus();
-        options.onBatchTextProgress?.(index, total, batch, receivedChars);
-      };
-
-      // Summarize batches. When onProgress is provided (i.e. /pruner now with the
-      // multi-row overlay) we process sequentially so each row can be checked off
-      // as its LLM call completes. Otherwise eligible batches run in parallel.
-      // Pre-skipped slots stay null in `results` and are handled via preSkipFlags.
-      let results: (import("./src/types.js").SummarizeResult | null)[] = batches.map(() => null);
-      if (options.onProgress) {
-        // /pruner now: limited concurrency worker pool (flushConcurrency).
-        for (let i = 0; i < batches.length; i++) {
-          if (preSkipFlags[i]) options.onProgress(i, batches.length, batches[i], "skipped");
-        }
-        const workIndices = batches.map((_, i) => i).filter((i) => !preSkipFlags[i]);
-        const workResults = await mapPool(
-          workIndices.length,
-          currentConfig.value.flushConcurrency,
-          async (workPos) => {
-            const i = workIndices[workPos];
-            options.onProgress!(i, batches.length, batches[i], "start");
-            const r = await summarizeBatch(batches[i], currentConfig.value, ctx, {
-              signal: options.signal,
-              onTextProgress: (receivedChars) => {
-                reportBatchTextProgress(i, batches.length, batches[i], receivedChars);
-              },
-            });
-            if (r) receivedByBatch[i] = Math.max(receivedByBatch[i], r.summaryText.length);
-            llmFinishedCount++;
-            pushFlushStatus();
-            options.onProgress!(i, batches.length, batches[i], r ? "done" : "skipped");
-            return r;
-          },
-        );
-        for (let w = 0; w < workIndices.length; w++) {
-          results[workIndices[w]] = workResults[w] ?? null;
-        }
-      } else {
-        // Parallel — one LLM call per eligible batch.
-        const summarizeIndices: number[] = [];
-        const summarizeBatchesList: CapturedBatch[] = [];
-        for (let i = 0; i < batches.length; i++) {
-          if (preSkipFlags[i]) continue;
-          summarizeIndices.push(i);
-          summarizeBatchesList.push(batches[i]);
-        }
-        if (summarizeBatchesList.length > 0) {
-          const subsetResults = await summarizeBatches(summarizeBatchesList, currentConfig.value, ctx, {
-            onBatchTextProgress: (subsetIndex, _subsetTotal, batch, receivedChars) => {
-              const fullIndex = summarizeIndices[subsetIndex];
-              reportBatchTextProgress(fullIndex, batches.length, batch, receivedChars);
-            },
+      // Pre-skip + summarizer calls + live status (testable seam).
+      const { results, preSkipFlags } = await runFlushSummarizePhase({
+        batches,
+        minRawCharsToSummarize: currentConfig.value.minRawCharsToSummarize,
+        flushConcurrency: currentConfig.value.flushConcurrency,
+        pooled: Boolean(options.onProgress),
+        signal: options.signal,
+        summarizeOne: (batch, _index, onTextProgress) =>
+          summarizeBatch(batch, currentConfig.value, ctx, {
             signal: options.signal,
-          });
-          for (let s = 0; s < summarizeIndices.length; s++) {
-            const fullIndex = summarizeIndices[s];
-            const r = subsetResults[s] ?? null;
-            results[fullIndex] = r;
-            if (r) receivedByBatch[fullIndex] = Math.max(receivedByBatch[fullIndex], r.summaryText.length);
-            llmFinishedCount++;
-          }
-          pushFlushStatus();
-        }
-      }
+            onTextProgress,
+          }),
+        onStatus: (text) => setPruneStatusWidget(ctx, currentConfig.value, text),
+        onProgress: options.onProgress,
+        onBatchTextProgress: options.onBatchTextProgress,
+      });
 
       // Process results in order; stop at first null on a non-pre-skip slot.
       // Batches before the first failure are persisted; remaining are restored to

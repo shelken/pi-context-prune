@@ -2,12 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-describe("index.ts /pruner now concurrency wiring", () => {
-  test("onProgress path uses mapPool with flushConcurrency", () => {
+describe("index.ts flush summarize wiring", () => {
+  test("flushPending delegates summarize phase to runFlushSummarizePhase", () => {
     const src = readFileSync(join(import.meta.dir, "..", "index.ts"), "utf-8");
-    expect(src).toContain('from "./src/async-pool.js"');
-    expect(src).toContain("mapPool");
-    expect(src).toContain("flushConcurrency");
-    expect(src).toContain("formatFlushStatusProgress");
+    expect(src).toContain("runFlushSummarizePhase");
+    expect(src).toContain("pooled: Boolean(options.onProgress)");
   });
 });

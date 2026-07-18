@@ -2,12 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-describe("index.ts pre-skip wiring", () => {
-  test("flushPending classifies batches with shouldPreSkipBatch before summarize", () => {
-    const src = readFileSync(join(import.meta.dir, "..", "index.ts"), "utf-8");
-    expect(src).toContain('from "./src/pre-skip.js"');
-    expect(src).toContain("shouldPreSkipBatch");
-    expect(src).toContain("preSkipFlags");
-    expect(src).toContain("skip ${preSkipCount} small");
+describe("pre-skip wiring through flush summarize phase", () => {
+  test("phase module is used from index and encodes pre-skip", () => {
+    const indexSrc = readFileSync(join(import.meta.dir, "..", "index.ts"), "utf-8");
+    const phaseSrc = readFileSync(join(import.meta.dir, "..", "src/flush-summarize-phase.ts"), "utf-8");
+    expect(indexSrc).toContain("runFlushSummarizePhase");
+    expect(phaseSrc).toContain("shouldPreSkipBatch");
+    expect(phaseSrc).toContain("minRawCharsToSummarize");
   });
 });

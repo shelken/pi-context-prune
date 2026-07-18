@@ -35,4 +35,22 @@ describe("mapPool", () => {
     });
     expect(order).toEqual([0, 1, 2]);
   });
+
+  test("first error stops scheduling new work and rethrows", async () => {
+    const started: number[] = [];
+    await expect(
+      mapPool(6, 2, async (i) => {
+        started.push(i);
+        if (i === 1) {
+          await Bun.sleep(5);
+          throw new Error("fail-1");
+        }
+        await Bun.sleep(30);
+        return i;
+      }),
+    ).rejects.toThrow("fail-1");
+    // With concurrency 2, indices 0 and 1 start; after error, 2+ should not all run.
+    expect(started.length).toBeLessThan(6);
+    expect(started).toContain(1);
+  });
 });
