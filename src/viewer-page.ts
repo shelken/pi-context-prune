@@ -489,7 +489,7 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
   }
 </style>
 </head>
-<body data-pruner-viewer="4">
+<body data-pruner-viewer="5">
   <header class="top">
     <div class="top-inner">
       <div class="brand">
@@ -895,6 +895,15 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
     }
   }
 
+  function hello() {
+    // Refcount ++ once per page load; bye -- on pagehide. Not on heartbeat.
+    fetch("/api/hello", {
+      method: "POST",
+      keepalive: true,
+      signal: AbortSignal.timeout(3000),
+    }).catch(() => {});
+  }
+
   function beat() {
     fetch("/api/heartbeat", {
       method: "POST",
@@ -909,6 +918,7 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
     } catch (_) {}
   });
 
+  hello();
   load();
   setInterval(load, 2500);
   beat();

@@ -19,7 +19,12 @@ const {
   handleViewerSessionShutdown,
   openViewer,
   publishViewerDocument,
+  VIEWER_TAB_STOP_DELAY_MS,
 } = await import("../src/viewer-server.ts");
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 afterEach(() => {
   __stopViewerServerForTests();
@@ -188,5 +193,49 @@ describe("viewer server (no browser)", () => {
 
     handleViewerSessionShutdown("quit");
     await expect(fetch(`${base}api/health`, { signal: AbortSignal.timeout(1000) })).rejects.toThrow();
+  });
+
+  test("last tab bye stops server after delay; second tab keeps it", async () => {
+    const base = getViewerUrl();
+    await publishViewerDocument(
+      buildViewerDocument([], new ToolCallIndexer(), {
+        sessionId: "tabs",
+        sessionLabel: "tabs",
+        timestamp: 1,
+      }),
+    );
+    await openViewer({ openBrowser: false });
+
+    await fetch(`${base}api/hello`, { method: "POST" });
+    await fetch(`${base}api/hello`, { method: "POST" });
+
+    // Close one tab — server must stay up.
+    await fetch(`${base}api/bye`, { method: "POST" });
+    await sleep(VIEWER_TAB_STOP_DELAY_MS + 80);
+    expect((await fetch(`${base}api/health`)).ok).toBe(true);
+
+    // Close last tab — delayed stop.
+    await fetch(`${base}api/bye`, { method: "POST" });
+    await sleep(VIEWER_TAB_STOP_DELAY_MS + 80);
+    await expect(fetch(`${base}api/health`, { signal: AbortSignal.timeout(1000) })).rejects.toThrow();
+  });
+
+  test("refresh race: bye then quick hello cancels stop", async () => {
+    const base = getViewerUrl();
+    await publishViewerDocument(
+      buildViewerDocument([], new ToolCallIndexer(), {
+        sessionId: "refresh",
+        sessionLabel: "refresh",
+        timestamp: 1,
+      }),
+    );
+    await openViewer({ openBrowser: false });
+
+    await fetch(`${base}api/hello`, { method: "POST" });
+    await fetch(`${base}api/bye`, { method: "POST" });
+    // New document boots before delay elapses.
+    await fetch(`${base}api/hello`, { method: "POST" });
+    await sleep(VIEWER_TAB_STOP_DELAY_MS + 80);
+    expect((await fetch(`${base}api/health`)).ok).toBe(true);
   });
 });

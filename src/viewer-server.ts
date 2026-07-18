@@ -20,7 +20,7 @@ export function getViewerUrl(): string {
   return `http://127.0.0.1:${getViewerPort()}/`;
 }
 /** Bump when HTML shell changes; used to detect a stale in-memory server from an older pi process. */
-export const VIEWER_UI_MARKER = 'data-pruner-viewer="4"';
+export const VIEWER_UI_MARKER = 'data-pruner-viewer="5"';
 
 // Tests must set PI_CONTEXT_PRUNE_HOME so they never clobber the live snapshot.
 function viewerDir(): string {
@@ -39,11 +39,12 @@ export function getViewerPagePath(): string {
   return join(viewerDir(), "viewer.html");
 }
 
-// Last-tab-close: page posts /api/heartbeat every 5s + sendBeacon(/api/bye) on pagehide.
-// Idle must be long — short timeouts kill the server mid-load (1MB+ JSON) and leave the tab stuck on "loading…".
+// Tab refcount: POST /api/hello ++, /api/bye --; last bye → delayed stop (refresh-safe).
+// Heartbeat only renews lastSeen; 60s with no touch is a lost-bye fallback.
 // Use node:http (not Bun.serve): Pi loads extensions under Node.
-const IDLE_MS = 30 * 60_000;
-const IDLE_CHECK_MS = 15_000;
+export const VIEWER_TAB_STOP_DELAY_MS = 300;
+const HEARTBEAT_STALE_MS = 60_000;
+const HEARTBEAT_CHECK_MS = 15_000;
 
 type ServerHandle = {
   stop: () => void;
@@ -57,6 +58,8 @@ const GLOBAL_KEY = "__piContextPruneViewerServer";
 type GlobalViewerState = {
   handle: ServerHandle | null;
   lastHeartbeat: number;
+  tabCount: number;
+  stopTimer: ReturnType<typeof setTimeout> | null;
   idleTimer: ReturnType<typeof setInterval> | null;
 };
 
@@ -65,9 +68,51 @@ function globalState(): GlobalViewerState {
     [GLOBAL_KEY]?: GlobalViewerState;
   };
   if (!g[GLOBAL_KEY]) {
-    g[GLOBAL_KEY] = { handle: null, lastHeartbeat: 0, idleTimer: null };
+    g[GLOBAL_KEY] = {
+      handle: null,
+      lastHeartbeat: 0,
+      tabCount: 0,
+      stopTimer: null,
+      idleTimer: null,
+    };
   }
   return g[GLOBAL_KEY]!;
+}
+
+function clearStopTimer(): void {
+  const s = globalState();
+  if (s.stopTimer) {
+    clearTimeout(s.stopTimer);
+    s.stopTimer = null;
+  }
+}
+
+function touchHeartbeat(): void {
+  globalState().lastHeartbeat = Date.now();
+}
+
+/** Tab finished loading (or refreshed). Cancels a pending empty-stop. */
+function onTabHello(): void {
+  const s = globalState();
+  clearStopTimer();
+  s.tabCount += 1;
+  touchHeartbeat();
+}
+
+/** Tab closed / navigated away. Last tab schedules a short delayed stop. */
+function onTabBye(): void {
+  const s = globalState();
+  s.tabCount = Math.max(0, s.tabCount - 1);
+  touchHeartbeat();
+  if (s.tabCount > 0) return;
+  clearStopTimer();
+  s.stopTimer = setTimeout(() => {
+    s.stopTimer = null;
+    if (globalState().tabCount === 0) {
+      stopViewerServer();
+    }
+  }, VIEWER_TAB_STOP_DELAY_MS);
+  s.stopTimer.unref?.();
 }
 
 function getLocalServer(): ServerHandle | null {
@@ -199,13 +244,15 @@ async function isViewerUiCurrent(): Promise<boolean> {
   }
 }
 
-/** Stop the in-process viewer server (idle / quit / tests). */
+/** Stop the in-process viewer server (last-tab / stale heartbeat / quit / tests). */
 export function stopViewerServer(): void {
   const state = globalState();
+  clearStopTimer();
   if (state.idleTimer) {
     clearInterval(state.idleTimer);
     state.idleTimer = null;
   }
+  state.tabCount = 0;
   if (state.handle) {
     state.handle.stop();
     state.handle = null;
@@ -223,16 +270,17 @@ export function handleViewerSessionShutdown(reason: string): void {
   }
 }
 
+/** Lost-bye fallback: no hello/heartbeat/poll for HEARTBEAT_STALE_MS → stop. */
 function armIdleWatch(): void {
   const state = globalState();
   if (state.idleTimer) return;
   state.idleTimer = setInterval(() => {
     const s = globalState();
     if (!s.handle) return;
-    if (Date.now() - s.lastHeartbeat > IDLE_MS) {
+    if (Date.now() - s.lastHeartbeat > HEARTBEAT_STALE_MS) {
       stopViewerServer();
     }
-  }, IDLE_CHECK_MS);
+  }, HEARTBEAT_CHECK_MS);
   state.idleTimer.unref?.();
 }
 
@@ -252,7 +300,10 @@ function startLocalServer(): Promise<void> {
     stopViewerServer();
   }
 
-  globalState().lastHeartbeat = Date.now();
+  const boot = globalState();
+  boot.lastHeartbeat = Date.now();
+  boot.tabCount = 0;
+  clearStopTimer();
 
   return new Promise((resolve, reject) => {
     const server: Server = createServer((req, res) => {
@@ -265,18 +316,24 @@ function startLocalServer(): Promise<void> {
             send(res, 200, "ok", { "cache-control": "no-store" });
             return;
           }
+          // Tab boot: increment refcount (not on heartbeat — that would explode).
+          if (url.pathname === "/api/hello" && method === "POST") {
+            onTabHello();
+            send(res, 200, "ok", { "cache-control": "no-store" });
+            return;
+          }
           if (url.pathname === "/api/heartbeat" && method === "POST") {
-            globalState().lastHeartbeat = Date.now();
+            touchHeartbeat();
             send(res, 200, "ok", { "cache-control": "no-store" });
             return;
           }
           if (url.pathname === "/api/bye" && (method === "POST" || method === "GET")) {
-            globalState().lastHeartbeat = Date.now() - IDLE_MS;
+            onTabBye();
             send(res, 200, "ok", { "cache-control": "no-store" });
             return;
           }
           if (url.pathname === "/api/meta") {
-            globalState().lastHeartbeat = Date.now();
+            touchHeartbeat();
             const raw = await readLatestSnapshot();
             let meta = {
               sessionId: "empty",
@@ -304,7 +361,7 @@ function startLocalServer(): Promise<void> {
             return;
           }
           if (url.pathname === "/api/original") {
-            globalState().lastHeartbeat = Date.now();
+            touchHeartbeat();
             const id = url.searchParams.get("id") ?? "";
             const text = await readOriginalBody(id);
             if (text == null) {
@@ -321,7 +378,7 @@ function startLocalServer(): Promise<void> {
             return;
           }
           if (url.pathname === "/api/latest") {
-            globalState().lastHeartbeat = Date.now();
+            touchHeartbeat();
             const body = await readLatestSnapshot();
             send(res, 200, body, {
               "content-type": "application/json; charset=utf-8",
@@ -330,7 +387,7 @@ function startLocalServer(): Promise<void> {
             return;
           }
           if (url.pathname === "/" || url.pathname === "/index.html") {
-            globalState().lastHeartbeat = Date.now();
+            touchHeartbeat();
             // Always read from disk so UI upgrades apply without restarting the handler body.
             const html = await readPageHtml();
             send(res, 200, html, {
@@ -435,8 +492,9 @@ export async function openViewer(options: OpenViewerOptions = {}): Promise<OpenV
     );
   }
 
-  globalState().lastHeartbeat = Date.now();
+  touchHeartbeat();
   const url = `${getViewerUrl()}?v=${Date.now()}`;
+
   // Only auto-open when we had to start the server, unless caller forceOpen.
   const shouldOpen =
     options.openBrowser !== false && (options.forceOpen === true || !alreadyRunning);
