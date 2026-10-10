@@ -17,7 +17,7 @@ describe("first-context hydration through the extension", () => {
         const child = spawnSync(process.execPath, [
           join(import.meta.dir, "fixtures/context-hydration-runner.ts"),
           enabled ? "enabled" : "disabled",
-        ], { env: { ...process.env, HOME: dir, PI_CODING_AGENT_DIR: dir }, encoding: "utf8", timeout: 15000 });
+        ], { env: { ...process.env, HOME: dir, PI_CODING_AGENT_DIR: join(dir, ".pi", "agent") }, encoding: "utf8", timeout: 15000 });
         expect(child.status, child.stderr).toBe(0);
         const artifact = JSON.parse(child.stdout.trim());
         if (enabled) {
