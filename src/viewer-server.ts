@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { mkdir, writeFile, readFile, rename, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import {
   stripOriginalsForWire,
@@ -8,7 +9,6 @@ import {
   type ViewerOriginals,
 } from "./viewer-document.js";
 import { VIEWER_PAGE_HTML } from "./viewer-page.js";
-import { contextPruneDir } from "./paths.js";
 
 /** Fixed port so every pi process opens the same local viewer. Override with PI_CONTEXT_PRUNE_VIEWER_PORT (tests). */
 export function getViewerPort(): number {
@@ -19,14 +19,15 @@ export function getViewerPort(): number {
 export function getViewerUrl(): string {
   return `http://127.0.0.1:${getViewerPort()}/`;
 }
-/** Bump when HTML shell changes; used to detect a stale in-memory server from an older pi process. */
-export const VIEWER_UI_MARKER = 'data-pruner-viewer="5"';
+// 数据目录变化也必须更新标记，避免复用仍读取私有目录的旧服务。
+export const VIEWER_UI_MARKER = 'data-pruner-viewer="6"';
 
 // Tests must set PI_CONTEXT_PRUNE_HOME so they never clobber the live snapshot.
 function viewerDir(): string {
   const override = process.env.PI_CONTEXT_PRUNE_HOME;
   if (override && override.length > 0) return override;
-  return contextPruneDir();
+  // 一个共享端口必须对应一个共享数据目录，不能随宿主或 profile 改变。
+  return join(homedir(), ".pi", "agent", "context-prune");
 }
 
 export function getViewerSnapshotPath(): string {
