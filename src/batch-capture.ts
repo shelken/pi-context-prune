@@ -25,6 +25,8 @@ export function captureBatch(
     .filter((block: any) => block.type === "toolCall")
     .map((block: any) => {
       const match = toolResults.find((result: any) => result.toolCallId === block.id);
+      const xdev = match?.details?.xdev;
+      const xdevExecution = xdev?.mode === "execute" && typeof xdev.tool === "string";
 
       let resultText = "(no result)";
       let isError = false;
@@ -40,8 +42,8 @@ export function captureBatch(
 
       return {
         toolCallId: block.id,
-        toolName: block.name,
-        args: block.input ?? block.args ?? block.arguments ?? {},
+        toolName: xdevExecution ? xdev.tool : block.name,
+        args: xdevExecution ? (xdev.args ?? {}) : (block.input ?? block.args ?? block.arguments ?? {}),
         resultText,
         isError,
       } satisfies CapturedToolCall;
@@ -118,7 +120,6 @@ export function captureUnindexedBatchesFromSession(
       const id = tc.id;
       if (!id) return false;
       if (indexer.isSummarized(id)) return false;
-      if (excludeToolNames.includes(tc.name)) return false;
       if (activeToolCallIds && !activeToolCallIds.has(id)) return false;
       return resultMap.has(id);
     });
@@ -133,12 +134,10 @@ export function captureUnindexedBatchesFromSession(
       // assistant message as "(no result)" placeholders.
       const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : (msg.timestamp ?? Date.now());
       const batch = captureBatch(msg, results, currentTurnIndex, ts);
-      batches.push({
-        ...batch,
-        toolCalls: batch.toolCalls.filter((tc) => readyIds.has(tc.toolCallId)),
-        // Tag with the current group so flushPending can merge by mode
-        userTurnGroup,
-      });
+      const toolCalls = batch.toolCalls.filter(
+        (tc) => readyIds.has(tc.toolCallId) && !excludeToolNames.includes(tc.toolName),
+      );
+      if (toolCalls.length > 0) batches.push({ ...batch, toolCalls, userTurnGroup });
     }
   }
 
@@ -194,9 +193,7 @@ export function serializeBatchesForSummarizer(batches: CapturedBatch[]): string 
  *                     into a single CapturedBatch, producing one summary per
  *                     user → final-agent-message span.
  *
- * Batches without a `userTurnGroup` (e.g. from the live `turn_end` capture path) are
- * always passed through one-per-batch regardless of mode — grouping only applies to
- * batches captured from the session branch scan.
+ * 未标记 `userTurnGroup` 的批次逐个保留，避免猜测它们所属的用户任务。
  *
  * Merge rules:
  *   - `assistantText` = non-empty values joined with "\n\n"

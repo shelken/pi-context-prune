@@ -229,8 +229,7 @@ export interface CapturedBatch {
   /**
    * Grouping key assigned by `captureUnindexedBatchesFromSession`.
    * Increments for each user message seen while walking the branch.
-   * Batches from the live `turn_end` path do NOT have this field set
-   * (they are always emitted one-per-turn regardless of batchingMode).
+   * 实时 turn_end 捕获和会话扫描都保留此标记，以维持相同的任务分组。
    * Used by `groupBatchesByMode` to merge turns within the same
    * user → agent-message span when batchingMode === "agent-message".
    */

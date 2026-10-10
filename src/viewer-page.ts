@@ -489,7 +489,7 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
   }
 </style>
 </head>
-<body data-pruner-viewer="5">
+<body data-pruner-viewer="6">
   <header class="top">
     <div class="top-inner">
       <div class="brand">

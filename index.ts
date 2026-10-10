@@ -2,7 +2,7 @@
  * context-prune — Pi extension entry point
  *
  * Wires together all modules:
- *   config       — load/save ~/.pi/agent/context-prune/settings.json
+ *   config       — load/save <agentDir>/context-prune/settings.json
  *   batch-capture — serialize turn_end event into CapturedBatch
  *   summarizer   — call LLM to summarize a CapturedBatch
  *   indexer      — maintain Map<toolCallId, ToolCallRecord> + session persistence
@@ -30,7 +30,6 @@ import {
   DEFAULT_CONFIG,
   CONTEXT_PRUNE_TOOL_NAME,
   CONTEXT_TAG_TOOL_NAMES,
-  AGENTIC_AUTO_SYSTEM_PROMPT,
   CUSTOM_TYPE_SUMMARY,
   CUSTOM_TYPE_INDEX,
   CUSTOM_TYPE_STATS,
@@ -42,6 +41,7 @@ import { PruneFrontierTracker } from "./src/frontier.js";
 import { handleAgentEndLifecycle } from "./src/agent-message-lifecycle.js";
 import { batchRawCharCount } from "./src/pre-skip.js";
 import { runFlushSummarizePhase } from "./src/flush-summarize-phase.js";
+import { appendAgenticAutoPrompt } from "./src/system-prompt.js";
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
@@ -121,31 +121,28 @@ export default function (pi: ExtensionAPI) {
     pendingBatches.unshift(...batches);
   };
 
-  /**
-   * Extract the set of toolCallIds that are in the current compaction-aware
-   * context (honors `/tree`, `/fork`, and compaction boundaries).
-   * Returns null when buildContextEntries is unavailable or fails — callers
-   * must fail closed (skip session scan) rather than scan the full branch.
-   */
+  // 宿主负责应用 compaction 与分支边界；接口不可用时不能扫描全部历史。
   const resolveActiveToolCallIds = (ctx: any): Set<string> | null => {
     const sm = ctx?.sessionManager;
-    if (!sm || typeof sm.buildContextEntries !== "function") return null;
-    let entries: unknown[];
+    let messages: unknown;
     try {
-      entries = sm.buildContextEntries();
+      if (typeof sm?.buildContextEntries === "function") {
+        messages = sm.buildContextEntries()
+          .filter((entry: any) => entry?.type === "message")
+          .map((entry: any) => entry.message);
+      } else if (typeof sm?.buildSessionContext === "function") {
+        messages = sm.buildSessionContext().messages;
+      } else {
+        return null;
+      }
     } catch {
       return null;
     }
-    if (!Array.isArray(entries)) return null;
+    if (!Array.isArray(messages)) return null;
     const ids = new Set<string>();
-    for (const e of entries) {
-      const entry = e as any;
-      if (
-        entry?.type === "message" &&
-        entry.message?.role === "toolResult" &&
-        typeof entry.message.toolCallId === "string"
-      ) {
-        ids.add(entry.message.toolCallId);
+    for (const message of messages) {
+      if (message?.role === "toolResult" && typeof message.toolCallId === "string") {
+        ids.add(message.toolCallId);
       }
     }
     return ids;
@@ -174,9 +171,7 @@ export default function (pi: ExtensionAPI) {
   const capturePendingBatches = (ctx: any): CapturedBatch[] => {
     let batches: CapturedBatch[] = [];
     try {
-      // Only scan tool results that are in the current compaction-aware context.
-      // buildContextEntries honors /tree leaf moves, /fork boundaries, and
-      // compaction firstKeptEntryId. Fail closed when it is unavailable.
+      // 仅用宿主确认仍在有效上下文内的结果，避免重新捕获已 compact 的历史。
       const activeToolCallIds = resolveActiveToolCallIds(ctx);
       if (activeToolCallIds) {
         const branch = ctx.sessionManager.getBranch();
@@ -569,6 +564,9 @@ export default function (pi: ExtensionAPI) {
     );
     const batch = trimBatchToPendingRange({
       ...capturedBatch,
+      userTurnGroup: ctx.sessionManager.getBranch().filter(
+        (entry: any) => entry.type === "message" && entry.message.role === "user",
+      ).length,
       // Do not summarize the pruner's own housekeeping tool result. Otherwise
       // agentic-auto mode can queue the context_prune result and try to flush it
       // during agent_end, when Pi may already have invalidated the extension ctx.
@@ -628,6 +626,9 @@ export default function (pi: ExtensionAPI) {
       pruneOn: currentConfig.value.pruneOn,
       messages: event.messages,
       pendingCount: pendingBatches.length,
+      // omp schedules automatic continuations (auto-retry, empty-stop retry).
+      // Flushing then would drop the very context the next attempt needs.
+      willContinue: (event as { willContinue?: boolean }).willContinue,
       signal: ctx.signal,
       flush: (options) => flushPending(ctx, options),
       setPendingStatus: (count) => {
@@ -687,11 +688,10 @@ export default function (pi: ExtensionAPI) {
   // ── before_agent_start: inject system prompt for agentic-auto mode ───────────
   pi.on("before_agent_start", async (event, _ctx) => {
     if (!currentConfig.value.enabled || currentConfig.value.pruneOn !== "agentic-auto") return undefined;
-    // Append agentic-auto instructions to the system prompt
-    const appended = AGENTIC_AUTO_SYSTEM_PROMPT;
-    const original = event.systemPrompt ?? "";
-    const newPrompt = original + "\n\n" + appended;
-    return { systemPrompt: newPrompt };
+    // omp passes `systemPrompt: string[]` and must get an array back; pi passes
+    // a string. `appendAgenticAutoPrompt` preserves the host shape. The cast is
+    // for pi's declaration, which only types `systemPrompt?: string`.
+    return appendAgenticAutoPrompt(event.systemPrompt) as unknown as { systemPrompt: string };
   });
 
   // ── Register context_tree_query tool ──────────────────────────────────────
