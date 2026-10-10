@@ -11,7 +11,8 @@ process.env.PI_CODING_AGENT_DIR = testAgentDir;
 
 type Handler = (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
 
-function makeFakePi() {
+function makeFakePi(sessionManager: Record<string, unknown> = {}) {
+  const tools = new Map<string, any>();
   const handlers = new Map<string, Handler[]>();
   const statusCalls: { id: string; text?: string }[] = [];
   let activeTools: string[] = [];
@@ -21,7 +22,7 @@ function makeFakePi() {
       list.push(handler);
       handlers.set(event, list);
     },
-    registerTool() {},
+    registerTool(tool: any) { tools.set(tool.name, tool); },
     registerCommand() {},
     registerMessageRenderer() {},
     appendEntry() {},
@@ -30,20 +31,23 @@ function makeFakePi() {
       activeTools = next;
     },
   };
+  const ctx = {
+    signal: new AbortController().signal,
+    model: { provider: "fixture", id: "fixture-model" },
+    sessionManager: { getBranch: () => [], getSessionId: () => "fixture-session", ...sessionManager },
+    ui: {
+      setStatus: (id: string, text?: string) => statusCalls.push({ id, text }),
+      notify() {},
+    },
+  };
   return {
     fake,
+    ctx,
+    tools,
     statusCalls,
     async fire(event: string, payload: unknown) {
       const list = handlers.get(event) ?? [];
       let result: unknown;
-      const ctx = {
-        signal: new AbortController().signal,
-        sessionManager: { getBranch: () => [] },
-        ui: {
-          setStatus: (id: string, text?: string) => statusCalls.push({ id, text }),
-          notify() {},
-        },
-      };
       for (const handler of list) result = await handler(payload, ctx);
       return result;
     },
@@ -75,7 +79,61 @@ function turnEndEvent(): unknown {
   };
 }
 
+function toolTurn(id: string, name = "read", details?: unknown) {
+  return {
+    turnIndex: 0,
+    message: { role: "assistant", content: [{ type: "toolCall", id, name, arguments: { path: "fixture.txt" } }] },
+    toolResults: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: "fixture result" }], details }],
+  };
+}
+
+function branchForTurns(turns: ReturnType<typeof toolTurn>[]) {
+  return [
+    { type: "message", message: { role: "user", content: [{ type: "text", text: "review fixtures" }] } },
+    ...turns.flatMap(turn => [
+      { type: "message", message: turn.message },
+      ...turn.toolResults.map(message => ({ type: "message", message })),
+    ]),
+  ];
+}
+
+async function startPruner(sessionManager: Record<string, unknown>, config: Record<string, unknown> = {}) {
+  writeSettings({ enabled: true, pruneOn: "agentic-auto", minRawCharsToSummarize: 100_000, ...config });
+  const host = makeFakePi(sessionManager);
+  register(host.fake as never);
+  await host.fire("session_start", {});
+  return host;
+}
+
+async function prune(host: Awaited<ReturnType<typeof startPruner>>) {
+  return host.tools.get("context_prune").execute("prune-fixture", {}, host.ctx.signal, undefined, host.ctx);
+}
+
 describe("omp host adaptation", () => {
+  test("reopened omp sessions capture only results in buildSessionContext", async () => {
+    const oldTurn = toolTurn("compacted-away");
+    const activeTurn = toolTurn("still-active");
+    const branch = branchForTurns([oldTurn, activeTurn]);
+    const host = await startPruner({
+      getBranch: () => branch,
+      buildSessionContext: () => ({ messages: [activeTurn.message, ...activeTurn.toolResults] }),
+    });
+
+    const result = await prune(host);
+    expect(result.details).toMatchObject({ ok: true, toolCallCount: 1, rawCharCount: 14 });
+  });
+
+  test("empty or unreadable omp context never scans old branch results", async () => {
+    const branch = branchForTurns([toolTurn("old-result")]);
+    for (const buildSessionContext of [
+      () => ({ messages: [] }),
+      () => { throw new Error("context unavailable"); },
+    ]) {
+      const host = await startPruner({ getBranch: () => branch, buildSessionContext });
+      expect((await prune(host)).details).toMatchObject({ ok: false, reason: "empty" });
+    }
+  });
+
   test("before_agent_start returns string[] for omp and keeps Markdown sections", async () => {
     writeSettings({ enabled: true, pruneOn: "agentic-auto" });
     const { fake, fire } = makeFakePi();

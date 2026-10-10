@@ -121,31 +121,28 @@ export default function (pi: ExtensionAPI) {
     pendingBatches.unshift(...batches);
   };
 
-  /**
-   * Extract the set of toolCallIds that are in the current compaction-aware
-   * context (honors `/tree`, `/fork`, and compaction boundaries).
-   * Returns null when buildContextEntries is unavailable or fails — callers
-   * must fail closed (skip session scan) rather than scan the full branch.
-   */
+  // 宿主负责应用 compaction 与分支边界；接口不可用时不能扫描全部历史。
   const resolveActiveToolCallIds = (ctx: any): Set<string> | null => {
     const sm = ctx?.sessionManager;
-    if (!sm || typeof sm.buildContextEntries !== "function") return null;
-    let entries: unknown[];
+    let messages: unknown;
     try {
-      entries = sm.buildContextEntries();
+      if (typeof sm?.buildContextEntries === "function") {
+        messages = sm.buildContextEntries()
+          .filter((entry: any) => entry?.type === "message")
+          .map((entry: any) => entry.message);
+      } else if (typeof sm?.buildSessionContext === "function") {
+        messages = sm.buildSessionContext().messages;
+      } else {
+        return null;
+      }
     } catch {
       return null;
     }
-    if (!Array.isArray(entries)) return null;
+    if (!Array.isArray(messages)) return null;
     const ids = new Set<string>();
-    for (const e of entries) {
-      const entry = e as any;
-      if (
-        entry?.type === "message" &&
-        entry.message?.role === "toolResult" &&
-        typeof entry.message.toolCallId === "string"
-      ) {
-        ids.add(entry.message.toolCallId);
+    for (const message of messages) {
+      if (message?.role === "toolResult" && typeof message.toolCallId === "string") {
+        ids.add(message.toolCallId);
       }
     }
     return ids;
@@ -174,9 +171,7 @@ export default function (pi: ExtensionAPI) {
   const capturePendingBatches = (ctx: any): CapturedBatch[] => {
     let batches: CapturedBatch[] = [];
     try {
-      // Only scan tool results that are in the current compaction-aware context.
-      // buildContextEntries honors /tree leaf moves, /fork boundaries, and
-      // compaction firstKeptEntryId. Fail closed when it is unavailable.
+      // 仅用宿主确认仍在有效上下文内的结果，避免重新捕获已 compact 的历史。
       const activeToolCallIds = resolveActiveToolCallIds(ctx);
       if (activeToolCallIds) {
         const branch = ctx.sessionManager.getBranch();
