@@ -42,7 +42,10 @@ describe.skipIf(!cli)("real host summarizer streaming", () => {
         ], {
           cwd: dir,
           env: {
-            ...process.env, PI_CODING_AGENT_DIR: dir, PRUNER_PROBE_MODE: mode,
+            ...process.env, HOME: dir, PI_CODING_AGENT_DIR: dir, OMP_PROFILE: "", PI_PROFILE: "",
+            XDG_CONFIG_HOME: join(dir, "config"), XDG_CACHE_HOME: join(dir, "cache"),
+            XDG_DATA_HOME: join(dir, "data"), XDG_STATE_HOME: join(dir, "state"),
+            PRUNER_PROBE_MODE: mode,
             PRUNER_PROBE_URL: `http://127.0.0.1:${port}/v1`, PRUNER_PROBE_RESULT: resultPath,
           },
           stdio: ["ignore", "pipe", "pipe"],
