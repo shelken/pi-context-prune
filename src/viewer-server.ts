@@ -24,7 +24,7 @@ export const VIEWER_UI_MARKER = 'data-pruner-viewer="5"';
 
 // Tests must set PI_CONTEXT_PRUNE_HOME so they never clobber the live snapshot.
 function viewerDir(): string {
-  const override = process.env.PI_CONTEXT_PRUNE_HOME ?? process.env.OMP_CONTEXT_PRUNE_HOME;
+  const override = process.env.PI_CONTEXT_PRUNE_HOME;
   if (override && override.length > 0) return override;
   return contextPruneDir();
 }
