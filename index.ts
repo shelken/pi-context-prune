@@ -13,7 +13,7 @@
  * Usage:  pi -e .
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
 import { resolveModel, summarizeBatch } from "./src/summarizer.js";
@@ -57,6 +57,15 @@ export default function (pi: ExtensionAPI) {
 
   // Shared prune frontier — tracks the last completed prune attempt boundary
   const frontier = new PruneFrontierTracker();
+
+  // Another extension can trigger context before our session_start runs.
+  let hydratedSessionId: string | undefined;
+  const hydrateFromSession = (ctx: ExtensionContext) => {
+    indexer.reconstructFromSession(ctx);
+    statsAccum.reconstructFromSession(ctx);
+    frontier.reconstructFromSession(ctx);
+    hydratedSessionId = ctx.sessionManager.getSessionId();
+  };
 
   // Pending batches — accumulated until the prune trigger fires
   const pendingBatches: CapturedBatch[] = [];
@@ -506,14 +515,7 @@ export default function (pi: ExtensionAPI) {
     // Cleanup is session_shutdown + module reload (globalThis handle).
     currentConfig.value = await loadConfig();
 
-    // Rebuild in-memory index from persisted session entries
-    indexer.reconstructFromSession(ctx);
-
-    // Rebuild stats accumulator from persisted session entries
-    statsAccum.reconstructFromSession(ctx);
-
-    // Rebuild prune frontier from persisted session entries
-    frontier.reconstructFromSession(ctx);
+    hydrateFromSession(ctx);
 
     // Clear any batches queued before the session reload
     pendingBatches.length = 0;
@@ -534,9 +536,7 @@ export default function (pi: ExtensionAPI) {
 
   // Rebuild index and stats after tree navigation too (branch may have different history)
   pi.on("session_tree", async (_event, ctx) => {
-    indexer.reconstructFromSession(ctx);
-    statsAccum.reconstructFromSession(ctx);
-    frontier.reconstructFromSession(ctx);
+    hydrateFromSession(ctx);
     // Pending batches belong to the old branch — discard them
     pendingBatches.length = 0;
     reminderWatermark = 0;
@@ -638,7 +638,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── context: prune summarized tool results from next LLM call ─────────────
-  pi.on("context", async (event, _ctx) => {
+  pi.on("context", async (event, ctx) => {
+    if (hydratedSessionId !== ctx.sessionManager.getSessionId()) {
+      // DEFAULT_CONFIG is disabled; consult the saved setting before gating.
+      currentConfig.value = await loadConfig();
+      hydrateFromSession(ctx);
+    }
     if (!currentConfig.value.enabled) {
       reminderWatermark = 0;
       return undefined;
