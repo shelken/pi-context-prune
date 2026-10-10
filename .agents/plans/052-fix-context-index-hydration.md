@@ -1,5 +1,5 @@
 ---
-name: 051-fix-context-index-hydration
+name: 052-fix-context-index-hydration
 description: 修复首次 context 早于 session_start 时配置与索引未恢复
 steps:
   - phase: 回归
