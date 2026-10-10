@@ -18,7 +18,9 @@
 - [x] 用两个真实进程复现跨 agent 目录的快照与原文错源
 - [x] 共享 Viewer 数据目录，保持宿主配置隔离，更新旧服务检测标记
 - [x] 同步 README 与 AGENTS 的配置位置和接口
-- [ ] 完成合并树与真实宿主回归，合并三个 PR
+- [x] 完成合并树与真实宿主回归：127 pass、2 skip、0 fail；Pi compatible/native 与 OMP compatible 单独全绿
+
+交付：合并三个 PR，更新 Nix 固定提交；不安装、不激活
 
 Viewer 延续一个端口、最新发布者覆盖的设计。测试必须隔离共享快照；各宿主配置与会话索引仍使用其 agent 目录
 
