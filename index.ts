@@ -564,6 +564,9 @@ export default function (pi: ExtensionAPI) {
     );
     const batch = trimBatchToPendingRange({
       ...capturedBatch,
+      userTurnGroup: ctx.sessionManager.getBranch().filter(
+        (entry: any) => entry.type === "message" && entry.message.role === "user",
+      ).length,
       // Do not summarize the pruner's own housekeeping tool result. Otherwise
       // agentic-auto mode can queue the context_prune result and try to flush it
       // during agent_end, when Pi may already have invalidated the extension ctx.

@@ -194,9 +194,7 @@ export function serializeBatchesForSummarizer(batches: CapturedBatch[]): string 
  *                     into a single CapturedBatch, producing one summary per
  *                     user → final-agent-message span.
  *
- * Batches without a `userTurnGroup` (e.g. from the live `turn_end` capture path) are
- * always passed through one-per-batch regardless of mode — grouping only applies to
- * batches captured from the session branch scan.
+ * 未标记 `userTurnGroup` 的批次逐个保留，避免猜测它们所属的用户任务。
  *
  * Merge rules:
  *   - `assistantText` = non-empty values joined with "\n\n"

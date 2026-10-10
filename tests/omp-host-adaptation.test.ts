@@ -134,6 +134,31 @@ describe("omp host adaptation", () => {
     }
   });
 
+  test.each([
+    ["agent-message", 1, 3, 1],
+    ["agent-message", 2, 2, 2],
+    ["turn", 1, 3, 3],
+  ] as const)("live %s queue groups %i user spans with %i turns into %i batches", async (batchingMode, users, turnsPerUser, expectedBatches) => {
+    const branch: any[] = [];
+    const host = await startPruner({
+      getBranch: () => branch,
+      buildSessionContext: () => { throw new Error("context unavailable"); },
+    }, { batchingMode });
+    let turnIndex = 0;
+    for (let user = 0; user < users; user++) {
+      branch.push({ type: "message", message: { role: "user", content: [{ type: "text", text: `task ${user}` }] } });
+      for (let i = 0; i < turnsPerUser; i++) {
+        const turn = { ...toolTurn(`call-${turnIndex}`), turnIndex: turnIndex++ };
+        branch.push({ type: "message", message: turn.message });
+        branch.push(...turn.toolResults.map(message => ({ type: "message", message })));
+        await host.fire("turn_end", turn);
+      }
+    }
+    expect((await prune(host)).details).toMatchObject({
+      ok: true, batchCount: expectedBatches, toolCallCount: users * turnsPerUser,
+    });
+  });
+
   test("before_agent_start returns string[] for omp and keeps Markdown sections", async () => {
     writeSettings({ enabled: true, pruneOn: "agentic-auto" });
     const { fake, fire } = makeFakePi();
