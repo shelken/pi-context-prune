@@ -79,6 +79,7 @@ type StreamSimple = (
 ) => ReturnType<typeof stream>;
 
 type RegistryWithCustomStream = ExtensionContext["modelRegistry"] & {
+  getProvider?: (providerName: string) => { stream: StreamSimple } | undefined;
   // 0.80.8+ facade; absent on 0.80.7 where registerProvider still bridges into compat.
   getRegisteredProviderConfig?: (providerName: string) =>
     | { streamSimple?: StreamSimple }
@@ -93,12 +94,8 @@ export type OpenModelStreamDeps = {
 /**
  * Open a model stream using the same path as the main agent when possible.
  *
- * Why: pi 0.80.8+ stopped bridging registerProvider({ streamSimple }) into
- * pi-ai/compat's global api registry. Direct compat.stream() then throws
- * "No API provider registered for api: <custom>" for extension providers
- * (codebuddy / grok-cli / ...). Prefer the provider's own streamSimple when
- * ModelRegistry exposes it; otherwise fall back to compat.stream for builtins
- * and for 0.80.7 where the bridge still exists.
+ * Native providers own their API implementation outside compat's registry.
+ * Older hosts expose legacy streamSimple or bridge into compat instead.
  */
 export function openModelStream(
   model: { provider: string },
@@ -108,6 +105,8 @@ export function openModelStream(
   deps: OpenModelStreamDeps = {},
 ): ReturnType<typeof stream> {
   const registry = ctx.modelRegistry as RegistryWithCustomStream;
+  const provider = registry.getProvider?.(model.provider);
+  if (provider) return provider.stream(model, context, options);
   const custom = registry.getRegisteredProviderConfig?.(model.provider)?.streamSimple;
   if (custom) {
     return custom(model, context, options);
@@ -132,7 +131,8 @@ export async function summarizeBatch(
   try {
     const model = resolveModel(config, ctx);
 
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model) as
+      Awaited<ReturnType<ExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>> & { baseUrl?: string };
     if (!auth.ok) {
       const authMessage = "error" in auth ? auth.error : "authentication failed";
       ctx.ui.notify(`pruner: summarization failed: ${authMessage}`, "error");
@@ -145,9 +145,8 @@ export async function summarizeBatch(
 
     // Pass the abort signal so the underlying fetch is cancelled immediately
     // when the user presses Esc while the tool is running.
-    // Prefer provider streamSimple (0.80.8+ custom apis); else compat.stream.
     const responseStream = openModelStream(
-      model,
+      auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
       {
         messages: [
           {
@@ -157,7 +156,7 @@ export async function summarizeBatch(
           },
         ],
       },
-      { apiKey: auth.apiKey, headers: auth.headers, signal: options.signal, ...summarizerThinkingOptions(config) },
+      { apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: options.signal, ...summarizerThinkingOptions(config) },
       ctx,
     );
 

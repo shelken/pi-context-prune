@@ -13,6 +13,30 @@ function ctxWith(
 }
 
 describe("openModelStream", () => {
+  test("uses the native host provider without entering the legacy API registry", () => {
+    const expected = { source: "native" } as any;
+    const calls: unknown[] = [];
+    const provider = {
+      stream(this: unknown, ...args: unknown[]) {
+        expect(this).toBe(provider);
+        calls.push(args);
+        return expected;
+      },
+    };
+    const ctx = { modelRegistry: {
+      getProvider: (name: string) => {
+        expect(name).toBe("codebuddy");
+        return provider;
+      },
+      getRegisteredProviderConfig: () => { throw new Error("legacy route must not run"); },
+    } } as any;
+
+    expect(openModelStream(model, context, options, ctx, { stream: (() => {
+      throw new Error("compat route must not run");
+    }) as never })).toBe(expected);
+    expect(calls).toEqual([[model, context, options]]);
+  });
+
   test("uses registry streamSimple when present", () => {
     const calls: unknown[] = [];
     const streamSimple = (m: unknown, c: unknown, o: unknown) => {
