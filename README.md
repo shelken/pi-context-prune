@@ -1,6 +1,6 @@
 # pi-context-prune
 
-A [Pi coding-agent](https://github.com/badlogic/pi-mono) extension that **summarizes completed tool-call batches**, prunes raw tool outputs from future LLM context, and exposes a `context_tree_query` escape hatch to recover any original output on demand.
+A [Pi coding-agent](https://github.com/badlogic/pi-mono) and [OMP](https://omp.sh/) extension that **summarizes completed tool-call batches**, prunes raw tool outputs from future LLM context, and exposes a `context_tree_query` escape hatch to recover any original output on demand.
 
 ## Related Extensions
 
@@ -27,7 +27,7 @@ As long agent sessions grow, every tool call adds token-heavy output to the cont
 4. **Prunes** the original verbose tool outputs from future context (`context` event)
 5. **Preserves** every original output in the session index — retrievable at any time via `context_tree_query`
 
-The session file is never modified. Pruning only affects the next request's context build.
+Original session messages are kept. The extension appends its index and summaries to the session; pruning changes future model request contexts.
 
 ## Installation
 
@@ -78,6 +78,18 @@ git clone https://github.com/championswimmer/pi-context-prune
 cd pi-context-prune
 pi -e .
 ```
+
+### Use with OMP
+
+From a source checkout with its dependencies installed, load the same extension with OMP:
+
+```bash
+omp -e .
+```
+
+The package declares both `pi.extensions` and `omp.extensions`. Pi and OMP use the same pruning modes, but keep separate settings files by default. See [Configuration](#configuration) for their locations.
+
+OMP exposes custom tools as xdev devices. The model invokes pruning by writing `{}` to `xd://context_prune`, and queries originals by writing a JSON `toolCallIds` request to `xd://context_tree_query`. Empty write content reads tool help rather than executing it.
 
 ### Manage installed extensions
 
@@ -148,6 +160,8 @@ The extension registers the `/pruner` command:
 | `/pruner now` | Flush pending tool calls immediately (works in all modes) with a cancellable multi-batch progress overlay; Esc/`q` aborts and restores pending batches |
 | `/pruner help` | Show full help text |
 
+The web viewer uses one shared endpoint and keeps its page, latest snapshot, and original-output sidecar under `~/.pi/agent/context-prune/` for both Pi and OMP, including named profiles. The latest publisher updates the shared view. Viewer files do not change either host's settings or session index.
+
 ### Settings overlay
 
 `/pruner settings` opens a TUI overlay with five interactive items:
@@ -158,7 +172,7 @@ The extension registers the `/pruner` command:
 4. **Summarizer model** — press Enter to open a searchable submenu listing `"default"` plus all available models
 5. **Summarizer thinking** — cycle through the thinking/reasoning level used for summarizer calls
 
-All changes are saved immediately to `~/.pi/agent/context-prune/settings.json` and reflected in the footer status widget when it is enabled.
+Changes are saved immediately to the host-specific settings file described under [Configuration](#configuration), and reflected in the footer status widget when enabled.
 
 ## Tools
 
@@ -187,7 +201,18 @@ The tool is guided by a system prompt that instructs the model to use it after c
 
 ## Configuration
 
-Config is stored in `~/.pi/agent/context-prune/settings.json` (global, project-independent):
+Configuration is global within the current host agent directory, independent of the project:
+
+| Host | Default settings file |
+|---|---|
+| Pi | `~/.pi/agent/context-prune/settings.json` |
+| OMP | `~/.omp/agent/context-prune/settings.json` |
+
+`PI_CODING_AGENT_DIR` overrides the agent directory. OMP also sets it for named profiles; when no agent override is present, OMP honors `PI_CONFIG_DIR`. Settings are resolved through `src/paths.ts:getSettingsPath()` when loaded or saved. To share settings between hosts, link both files to the same JSON source.
+
+Without an explicit agent directory, the extension uses the Bun runtime to distinguish OMP from Pi. If you run Pi under Bun, set `PI_CODING_AGENT_DIR` explicitly.
+
+The settings file contains:
 
 ```json
 {
@@ -212,7 +237,7 @@ Config is stored in `~/.pi/agent/context-prune/settings.json` (global, project-i
 - `showPruneStatusLine: true` keeps the prune footer widget and the automatic queued-turn notice visible. Turn it off if you want pruning to stay active without the extra status noise.
 - `remindUnprunedCount: true` appends a small ephemeral `<pruner-note>` when unpruned tool calls first reach 8, then 12. The `context_prune` housekeeping call is excluded. This only has an effect when `pruneOn` is set to `"agentic-auto"`.
 
-- `summarizerModel: "default"` means the current active Pi model. An explicit value like `"anthropic/claude-haiku-3-5"` uses that model for summarization (must be registered in Pi and have an API key).
+- `summarizerModel: "default"` means the current active host model. An explicit value like `"anthropic/claude-haiku-3-5"` uses that model for summarization (must be registered in your host and have an API key).
 - `summarizerThinking: "default"` preserves old behavior: no explicit thinking/reasoning option is added to summarizer calls.
 - `summarizerThinking: "off"` requests no summarizer reasoning where the provider adapter supports an explicit disable path. Some providers may still fall back to their own default behavior.
 - `"minimal"`, `"low"`, `"medium"`, `"high"`, and `"xhigh"` request that thinking level for summarizer calls where supported. For cheap background summarization, prefer `"minimal"` or `"low"` with a small/fast model.
@@ -220,7 +245,7 @@ Config is stored in `~/.pi/agent/context-prune/settings.json` (global, project-i
 
 ### Choosing a Summarizer Model
 
-The default (`"default"`) reuses whatever model you have active in Pi. **This is convenient but wasteful** — you don't need a powerful coding model to write a bullet-point summary of tool outputs. Using a cheaper, faster model here reduces both latency and cost without any quality trade-off.
+The default (`"default"`) reuses whatever model you have active in the host. **This is convenient but wasteful** — you don't need a powerful coding model to write a bullet-point summary of tool outputs. Using a cheaper, faster model here reduces both latency and cost without any quality trade-off.
 
 > **Rule of thumb:** pick the smallest/fastest model available on your current subscription or API plan.
 
@@ -244,7 +269,7 @@ Set it with:
 /pruner settings
 ```
 
-Or directly in `~/.pi/agent/context-prune/settings.json`:
+Or edit the [settings file for your host](#configuration) directly:
 
 ```json
 {
@@ -259,7 +284,8 @@ Or directly in `~/.pi/agent/context-prune/settings.json`:
 index.ts                    — entry point, wires events + modules
 src/
   types.ts                  — shared types, constants, PruneOn modes
-  config.ts                 — load/save ~/.pi/agent/context-prune/settings.json
+  config.ts                 — load/save host-specific settings
+  paths.ts                  — host agent-directory and settings-path resolution
   batch-capture.ts          — serialize turn_end event → CapturedBatch
   summarizer.ts             — resolve model, call LLM, build summary text
   indexer.ts                — Map<toolCallId, ToolCallRecord> + session persistence
@@ -278,7 +304,7 @@ src/
 
 ```
 session_start
-  └─► loadConfig()              read ~/.pi/agent/context-prune/settings.json
+  └─► loadConfig()              read the host-specific settings file
   └─► indexer.reconstruct()     rebuild Map from session branch entries
   └─► statsAccum.reconstruct()  rebuild stats from session branch entries
   └─► frontier.reconstruct()    rebuild last prune-attempt boundary from session entries
@@ -326,7 +352,7 @@ before_agent_start (agentic-auto mode)
 
 ### Session persistence
 
-- **Config** lives in `~/.pi/agent/context-prune/settings.json` — the extension's own file, independent of Pi's project settings
+- **Config** lives in `<agentDir>/context-prune/settings.json`, independent of project settings; Pi and OMP have separate defaults listed under [Configuration](#configuration).
 - **Index** is persisted via `pi.appendEntry("context-prune-index", { toolCalls })` — one entry per summarized batch, NOT in LLM context
 - **Prune frontier** is persisted via `pi.appendEntry("context-prune-frontier", ...)` — it records the last attempted prune boundary even when an oversized summary is rejected
 - **Summaries** are injected as hidden `custom_message` entries with `customType: "context-prune-summary"` — these ARE in LLM context (replacing the raw outputs only when pruning is accepted) but are not rendered into Pi's main message window. Their text uses short refs, while the `details.toolCallRefs` metadata keeps the full `toolCallId` mapping for later recovery.
