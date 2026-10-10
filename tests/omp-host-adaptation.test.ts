@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENTIC_AUTO_SYSTEM_PROMPT } from "../src/types.ts";
+import { captureBatch } from "../src/batch-capture.ts";
 
 // Isolate settings BEFORE importing the extension so nothing touches a real home.
 const testAgentDir = mkdtempSync(join(tmpdir(), "pruner-omp-agent-"));
@@ -157,6 +158,37 @@ describe("omp host adaptation", () => {
     expect((await prune(host)).details).toMatchObject({
       ok: true, batchCount: expectedBatches, toolCallCount: users * turnsPerUser,
     });
+  });
+
+  test.each(["live", "reopened"] as const)("xdev housekeeping is excluded from %s capture", async (mode) => {
+    const turn = toolTurn("wrapped-prune", "write", { xdev: { tool: "context_prune", mode: "execute", args: {} } });
+    const branch = branchForTurns([turn]);
+    const host = await startPruner({
+      getBranch: () => branch,
+      ...(mode === "reopened" ? { buildSessionContext: () => ({ messages: [turn.message, ...turn.toolResults] }) } : {}),
+    });
+    if (mode === "live") await host.fire("turn_end", turn);
+    expect((await prune(host)).details).toMatchObject({ ok: false, reason: "empty" });
+  });
+
+  test("ordinary writes remain eligible for pruning", async () => {
+    const turn = toolTurn("ordinary-write", "write");
+    const host = await startPruner({ getBranch: () => branchForTurns([turn]) });
+    await host.fire("turn_end", turn);
+    expect((await prune(host)).details).toMatchObject({ ok: true, toolCallCount: 1 });
+  });
+
+  test("xdev capture preserves original call id and inner arguments", () => {
+    const args = { toolCallIds: ["t1"] };
+    const turn = toolTurn("wrapped-query", "write", { xdev: { tool: "context_tree_query", mode: "execute", args } });
+    expect(captureBatch(turn.message, turn.toolResults, 0, 0).toolCalls[0]).toMatchObject({
+      toolCallId: "wrapped-query", toolName: "context_tree_query", args,
+    });
+  });
+
+  test("xdev help reads keep their original tool identity", () => {
+    const turn = toolTurn("read-help", "read", { xdev: { tool: "context_prune", mode: "help" } });
+    expect(captureBatch(turn.message, turn.toolResults, 0, 0).toolCalls[0]?.toolName).toBe("read");
   });
 
   test("before_agent_start returns string[] for omp and keeps Markdown sections", async () => {
