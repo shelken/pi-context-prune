@@ -10,7 +10,7 @@
 import { Type } from "@sinclair/typebox";
 import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CapturedBatch, FlushOptions } from "./types.js";
-import { CONTEXT_PRUNE_TOOL_NAME } from "./types.js";
+import { CONTEXT_PRUNE_TOOL_NAME, HOST_TOP_LEVEL_PRESENTATION } from "./types.js";
 import { pruneProgressText } from "./progress-text.js";
 
 /**
@@ -40,6 +40,7 @@ export function registerContextPruneTool(
   flushFn: (ctx: ExtensionContext, options?: FlushOptions) => Promise<FlushResult>,
 ): void {
   pi.registerTool({
+    ...HOST_TOP_LEVEL_PRESENTATION,
     name: CONTEXT_PRUNE_TOOL_NAME,
     label: "Prune Context",
     description:

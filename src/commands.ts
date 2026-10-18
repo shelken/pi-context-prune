@@ -288,7 +288,7 @@ export function registerCommands(
     | { ok: false; reason: string; error?: string }
   >,
   capturePendingBatches: (ctx: ExtensionCommandContext) => CapturedBatch[],
-  syncToolActivation: () => void,
+  syncToolActivation: () => Promise<void>,
   getStats: () => SummarizerStats,
   indexer: ToolCallIndexer,
 ): void {
@@ -481,8 +481,12 @@ export function registerCommands(
             saveConfig(newConfig);
             setPruneStatusWidget(ctx, newConfig, getStats());
             settingsList?.invalidate();
-            // Toggle context_prune tool activation when config changes
-            syncToolActivation();
+            // Toggle context_prune tool activation when config changes.
+            // SettingsList's onChange is synchronous, so surface a failed
+            // activation instead of letting it become an unhandled rejection.
+            void syncToolActivation().catch((err: unknown) => {
+              ctx.ui.notify(`pruner: tool activation failed — ${err instanceof Error ? err.message : String(err)}`, "error");
+            });
           };
 
           settingsList = new SettingsList(
@@ -517,7 +521,7 @@ export function registerCommands(
           saveConfig(currentConfig.value);
           ctx.ui.notify("Context pruning enabled.");
           setPruneStatusWidget(ctx, currentConfig.value, getStats());
-          syncToolActivation();
+          await syncToolActivation();
           break;
         }
 
@@ -527,7 +531,7 @@ export function registerCommands(
           saveConfig(currentConfig.value);
           ctx.ui.notify("Context pruning disabled.");
           setPruneStatusWidget(ctx, currentConfig.value, getStats());
-          syncToolActivation();
+          await syncToolActivation();
           break;
         }
 
@@ -658,7 +662,7 @@ export function registerCommands(
           }
           saveConfig(currentConfig.value);
           setPruneStatusWidget(ctx, currentConfig.value, getStats());
-          syncToolActivation();
+          await syncToolActivation();
           break;
         }
 

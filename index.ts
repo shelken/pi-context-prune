@@ -494,18 +494,23 @@ export default function (pi: ExtensionAPI) {
   // ── Helper: toggle context_prune tool activation based on config ───────────
   // Uses `pi` (ExtensionRuntime) because getActiveTools/setActiveTools are
   // runtime methods, NOT part of ExtensionContext/ExtensionCommandContext.
-  const syncToolActivation = () => {
+  //
+  // Must be awaited by lifecycle and command handlers: omp resolves
+  // `setActiveTools` asynchronously (it enqueues a presentation update that
+  // re-partitions top-level vs xd:// tools), so awaiting is what guarantees the
+  // change has landed before the handler returns — and surfaces a failure. The
+  // call starts either way; awaiting does not decide whether it runs. pi's
+  // implementation is synchronous, so awaiting it only adds a microtask there.
+  const syncToolActivation = async (): Promise<void> => {
     const shouldActivate = currentConfig.value.enabled && currentConfig.value.pruneOn === "agentic-auto";
     const activeTools = pi.getActiveTools();
-    if (shouldActivate) {
-      if (!activeTools.includes(CONTEXT_PRUNE_TOOL_NAME)) {
-        pi.setActiveTools([...activeTools, CONTEXT_PRUNE_TOOL_NAME]);
-      }
-    } else {
-      if (activeTools.includes(CONTEXT_PRUNE_TOOL_NAME)) {
-        pi.setActiveTools(activeTools.filter((t: string) => t !== CONTEXT_PRUNE_TOOL_NAME));
-      }
-    }
+    const isActive = activeTools.includes(CONTEXT_PRUNE_TOOL_NAME);
+    if (shouldActivate === isActive) return;
+    await pi.setActiveTools(
+      shouldActivate
+        ? [...activeTools, CONTEXT_PRUNE_TOOL_NAME]
+        : activeTools.filter((t: string) => t !== CONTEXT_PRUNE_TOOL_NAME),
+    );
   };
 
   // ── session_start: restore config + index + stats ────────────────────────────────
@@ -525,8 +530,9 @@ export default function (pi: ExtensionAPI) {
     // Update footer status
     setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
 
-    // Toggle context_prune tool activation for agentic-auto mode
-    syncToolActivation();
+    // Toggle context_prune tool activation for agentic-auto mode. Awaited so
+    // the tool is in the first request's schema, not a later reconcile's.
+    await syncToolActivation();
 
     ctx.ui.notify(
       `pruner loaded — pruning ${currentConfig.value.enabled ? "ON" : "OFF"} | model: ${currentConfig.value.summarizerModel}`,

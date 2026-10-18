@@ -89,7 +89,7 @@ omp -e .
 
 The package declares both `pi.extensions` and `omp.extensions`. Pi and OMP use the same pruning modes, but keep separate settings files by default. See [Configuration](#configuration) for their locations.
 
-OMP exposes custom tools as xdev devices. The model invokes pruning by writing `{}` to `xd://context_prune`, and queries originals by writing a JSON `toolCallIds` request to `xd://context_tree_query`. Empty write content reads tool help rather than executing it.
+OMP mounts extension tools behind `xd://` devices by default, so both tools register with `loadMode: "essential"` and stay in the top-level schema. The model calls `context_prune` and `context_tree_query` directly, the same way it does under Pi. `tools.xdevInlineDevices` is unrelated to this: it only controls whether a mounted device's docs are inlined into the system prompt, and has no effect on how a tool is presented.
 
 ### Manage installed extensions
 

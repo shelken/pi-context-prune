@@ -63,6 +63,27 @@ export const STATUS_WIDGET_ID = "context-prune";
 export const CONTEXT_PRUNE_TOOL_NAME = "context_prune";
 
 /**
+ * omp presentation mode that keeps an extension tool in the top-level schema.
+ *
+ * omp mounts every `discoverable` extension tool behind `write xd://<tool>`;
+ * only `essential` tools keep their own schema in the request. `tools.xdev` in
+ * the host config decides whether mounting happens at all, and
+ * `tools.xdevInlineDevices` only inlines device DOCS into the system prompt —
+ * it never changes presentation. pi has no such split, so this is inert there.
+ */
+export const HOST_TOP_LEVEL_LOAD_MODE = "essential" as const;
+
+/**
+ * Registration fields that pin a tool to the top-level schema.
+ *
+ * Spread into `pi.registerTool({ ...HOST_TOP_LEVEL_PRESENTATION, ... })`.
+ * Spreading (rather than writing `loadMode` inline) keeps this compiling
+ * against pi's `ToolDefinition`, which has no `loadMode` field: object spread
+ * skips excess-property checks, so the same registration works on both hosts.
+ */
+export const HOST_TOP_LEVEL_PRESENTATION = { loadMode: HOST_TOP_LEVEL_LOAD_MODE };
+
+/**
  * Tool names from the pi-context extension that trigger a flush in "on-context-tag" mode.
  *
  * Current pi-context versions renamed `context_tag` to `context_checkpoint`

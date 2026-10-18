@@ -12,8 +12,19 @@ process.env.PI_CODING_AGENT_DIR = testAgentDir;
 
 type Handler = (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
 
+/** The subset of a registered tool the fake host stores and the tests read. */
+interface RegisteredToolLike {
+  name: string;
+  /** omp presentation mode; absent means omp mounts the tool behind xd://. */
+  loadMode?: "essential" | "discoverable";
+  execute(toolCallId: string, params: unknown, signal: AbortSignal, onUpdate: undefined, ctx: unknown): Promise<{
+    content: { type: string; text: string }[];
+    details: unknown;
+  }>;
+}
+
 function makeFakePi(sessionManager: Record<string, unknown> = {}) {
-  const tools = new Map<string, any>();
+  const tools = new Map<string, RegisteredToolLike>();
   const handlers = new Map<string, Handler[]>();
   const statusCalls: { id: string; text?: string }[] = [];
   let activeTools: string[] = [];
@@ -23,13 +34,23 @@ function makeFakePi(sessionManager: Record<string, unknown> = {}) {
       list.push(handler);
       handlers.set(event, list);
     },
-    registerTool(tool: any) { tools.set(tool.name, tool); },
+    registerTool(tool: RegisteredToolLike) { tools.set(tool.name, tool); },
     registerCommand() {},
     registerMessageRenderer() {},
     appendEntry() {},
     getActiveTools: () => activeTools,
-    setActiveTools: (next: string[]) => {
-      activeTools = next;
+    // omp applies the presentation asynchronously through a serialized
+    // mutation queue: the call enqueues the update, and the new set becomes
+    // visible only once the returned promise settles. A short microtask chain
+    // models that boundary deterministically (no wall-clock timers), so a test
+    // can tell "awaited" apart from "started but not yet visible" — which is
+    // exactly the guarantee syncToolActivation gives its async callers.
+    setActiveTools: (next: string[]): Promise<void> => {
+      let chain = Promise.resolve();
+      for (let hop = 0; hop < 4; hop++) chain = chain.then(() => {});
+      return chain.then(() => {
+        activeTools = next;
+      });
     },
   };
   const ctx = {
@@ -140,7 +161,7 @@ describe("omp host adaptation", () => {
     ["agent-message", 2, 2, 2],
     ["turn", 1, 3, 3],
   ] as const)("live %s queue groups %i user spans with %i turns into %i batches", async (batchingMode, users, turnsPerUser, expectedBatches) => {
-    const branch: any[] = [];
+    const branch: unknown[] = [];
     const host = await startPruner({
       getBranch: () => branch,
       buildSessionContext: () => { throw new Error("context unavailable"); },
@@ -205,6 +226,33 @@ describe("omp host adaptation", () => {
     expect(result).toEqual({
       systemPrompt: ["# Section A", "text, with commas", AGENTIC_AUTO_SYSTEM_PROMPT],
     });
+  });
+
+  test("both tools register as essential so omp keeps them top-level", async () => {
+    // omp mounts every `discoverable` extension tool behind `write xd://<tool>`
+    // and only inlines its docs. tools.xdevInlineDevices changes nothing here:
+    // it is a prompt-docs allowlist, not a presentation switch.
+    const { tools } = await startPruner({ getBranch: () => [] });
+    for (const name of ["context_prune", "context_tree_query"]) {
+      expect(tools.get(name)?.loadMode).toBe("essential");
+    }
+  });
+
+  test("agentic-auto activation completes inside session_start", async () => {
+    // omp resolves setActiveTools asynchronously. A fire-and-forget call leaves
+    // the tool out of the first request's schema; awaiting it inside the
+    // handler is what makes it visible by the time the session is live.
+    const host = await startPruner({ getBranch: () => [] });
+    expect(host.fake.getActiveTools()).toContain("context_prune");
+  });
+
+  test("disabling pruning removes the tool from the active set", async () => {
+    const host = await startPruner({ getBranch: () => [] });
+    expect(host.fake.getActiveTools()).toContain("context_prune");
+
+    writeSettings({ enabled: false, pruneOn: "agentic-auto" });
+    await host.fire("session_start", {});
+    expect(host.fake.getActiveTools()).not.toContain("context_prune");
   });
 
   test("agent_end with willContinue keeps pending work uncommitted", async () => {
