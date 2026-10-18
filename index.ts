@@ -495,11 +495,12 @@ export default function (pi: ExtensionAPI) {
   // Uses `pi` (ExtensionRuntime) because getActiveTools/setActiveTools are
   // runtime methods, NOT part of ExtensionContext/ExtensionCommandContext.
   //
-  // Must be awaited: omp resolves `setActiveTools` asynchronously (it re-applies
-  // the whole tool presentation, including the xd:// partition), so a
-  // fire-and-forget call leaves the tool unactivated until some later reconcile
-  // — or forever, when nothing else triggers one. pi's implementation is
-  // synchronous, so awaiting it is a no-op there.
+  // Must be awaited by lifecycle and command handlers: omp resolves
+  // `setActiveTools` asynchronously (it enqueues a presentation update that
+  // re-partitions top-level vs xd:// tools), so awaiting is what guarantees the
+  // change has landed before the handler returns — and surfaces a failure. The
+  // call starts either way; awaiting does not decide whether it runs. pi's
+  // implementation is synchronous, so awaiting it only adds a microtask there.
   const syncToolActivation = async (): Promise<void> => {
     const shouldActivate = currentConfig.value.enabled && currentConfig.value.pruneOn === "agentic-auto";
     const activeTools = pi.getActiveTools();

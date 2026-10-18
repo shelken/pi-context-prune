@@ -40,10 +40,11 @@ function makeFakePi(sessionManager: Record<string, unknown> = {}) {
     appendEntry() {},
     getActiveTools: () => activeTools,
     // omp applies the presentation asynchronously through a serialized
-    // mutation queue, so the new set only becomes visible once the returned
-    // promise settles. A short microtask chain models that boundary
-    // deterministically (no wall-clock timers): awaiting it applies the set
-    // before the caller continues, fire-and-forget does not.
+    // mutation queue: the call enqueues the update, and the new set becomes
+    // visible only once the returned promise settles. A short microtask chain
+    // models that boundary deterministically (no wall-clock timers), so a test
+    // can tell "awaited" apart from "started but not yet visible" — which is
+    // exactly the guarantee syncToolActivation gives its async callers.
     setActiveTools: (next: string[]): Promise<void> => {
       let chain = Promise.resolve();
       for (let hop = 0; hop < 4; hop++) chain = chain.then(() => {});
